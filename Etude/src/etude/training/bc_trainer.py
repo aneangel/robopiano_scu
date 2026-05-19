@@ -26,7 +26,7 @@ def train_bc_epoch(
     for batch in loader:
         features = batch["features"].to(device).float()
         actions = batch["actions"].to(device).float()
-        pred = model(features.reshape(-1, features.shape[-1])).reshape_as(actions)
+        pred = _run_model(model, features, actions)
         loss = behavior_cloning_loss(pred, actions)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -34,3 +34,11 @@ def train_bc_epoch(
         total += float(loss.detach().cpu()) * features.shape[0]
         count += features.shape[0]
     return TrainResult(train_loss=total / max(count, 1))
+
+
+def _run_model(model: torch.nn.Module, features: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    if features.ndim == 3 and hasattr(model, "gru"):
+        output = model(features)
+        pred = output[0] if isinstance(output, tuple) else output
+        return pred.reshape_as(actions)
+    return model(features.reshape(-1, features.shape[-1])).reshape_as(actions)
