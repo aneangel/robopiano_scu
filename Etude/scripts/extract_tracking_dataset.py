@@ -102,6 +102,7 @@ def _extract_from_zarr(
         song_names = song_names[:max_songs]
 
     rows: list[dict[str, object]] = []
+    skipped_episodes = 0
     episode_id = 0
     for song_name in song_names:
         group = root[song_name]
@@ -111,19 +112,24 @@ def _extract_from_zarr(
         if max_episodes_per_song is not None:
             num_episodes = min(num_episodes, max_episodes_per_song)
         for episode_index in range(num_episodes):
-            q = np.asarray(group["hand_joints"][episode_index], dtype=np.float32)
-            if q.ndim != 2:
+            try:
+                q = np.asarray(group["hand_joints"][episode_index], dtype=np.float32)
+                if q.ndim != 2:
+                    continue
+                q = _fit_dim(q, 46)
+                qdot = (
+                    np.asarray(group["joint_velocities"][episode_index], dtype=np.float32)
+                    if "joint_velocities" in group
+                    else finite_difference(q, 0.005)
+                )
+                qdot = _fit_dim(qdot, 46)
+                actions = np.asarray(group["actions"][episode_index], dtype=np.float32)
+                target_keys = _extract_target_keys(group, episode_index, q.shape[0])
+                fingertips = _extract_fingertips(group, episode_index, q.shape[0])
+            except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
+                skipped_episodes += 1
+                print(f"Skipping corrupted RP1M episode {song_name}[{episode_index}]: {exc}")
                 continue
-            q = _fit_dim(q, 46)
-            qdot = (
-                np.asarray(group["joint_velocities"][episode_index], dtype=np.float32)
-                if "joint_velocities" in group
-                else finite_difference(q, 0.005)
-            )
-            qdot = _fit_dim(qdot, 46)
-            actions = np.asarray(group["actions"][episode_index], dtype=np.float32)
-            target_keys = _extract_target_keys(group, episode_index, q.shape[0])
-            fingertips = _extract_fingertips(group, episode_index, q.shape[0])
             rows.append(
                 _write_episode(
                     episodes_dir,
@@ -137,6 +143,8 @@ def _extract_from_zarr(
                 )
             )
             episode_id += 1
+    if skipped_episodes:
+        print(f"Skipped {skipped_episodes} corrupted RP1M episodes while extracting {source}")
     return rows
 
 
