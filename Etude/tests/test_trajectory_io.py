@@ -41,3 +41,43 @@ def test_load_qpos_trajectory_accepts_impromptu_payload(tmp_path) -> None:
     assert payload["qdot_ref"].shape == (4, 46)
     assert payload["metadata"]["source_format"] == "impromptu_planner_npz"
     assert payload["metadata"]["target_keys"].shape == (4, 88)
+
+
+def test_load_qpos_trajectory_normalizes_bagatelle_metadata(tmp_path) -> None:
+    path = tmp_path / "bagatelle_plan.npz"
+    planned = np.ones((4, 46), dtype=np.float32)
+    velocities = np.full((4, 46), 0.25, dtype=np.float32)
+    target_keys = np.zeros((4, 88), dtype=np.float32)
+    target_keys[1:3, 10] = 1.0
+    fingertip_targets = np.stack(
+        [
+            np.full((10, 3), 0.1, dtype=np.float32),
+            np.full((10, 3), 0.2, dtype=np.float32),
+        ],
+        axis=0,
+    )
+    assignments = np.full((2, 10), -1, dtype=np.int32)
+    assignments[:, 0] = 10
+    assignment_costs = np.full((2, 10), np.nan, dtype=np.float32)
+    assignment_costs[:, 0] = 0.5
+    np.savez_compressed(
+        path,
+        planned_hand_joints=planned,
+        planned_hand_velocities=velocities,
+        target_keys=target_keys,
+        waypoint_frames=np.array([0, 2], dtype=np.int32),
+        fingertip_targets=fingertip_targets,
+        assignments=assignments,
+        assignment_costs=assignment_costs,
+    )
+
+    payload = load_qpos_trajectory(path)
+
+    metadata = payload["metadata"]
+    assert metadata["desired_fingertips"].shape == (4, 10, 3)
+    assert metadata["active_finger_mask"].shape == (4, 10)
+    assert metadata["inactive_finger_mask"].shape == (4, 10)
+    assert metadata["fingertip_weights"].shape == (4, 10)
+    assert metadata["active_finger_mask"][0, 0] == 0.0
+    assert metadata["active_finger_mask"][1, 0] == 1.0
+    assert metadata["active_finger_mask"][3, 0] == 0.0

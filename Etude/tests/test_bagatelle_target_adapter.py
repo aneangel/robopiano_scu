@@ -32,6 +32,16 @@ def test_assignment_masks_create_active_and_inactive_fingers() -> None:
     np.testing.assert_array_equal(inactive[0], 1.0 - active[0])
 
 
+def test_assignment_masks_follow_target_key_activity_windows() -> None:
+    assignments = np.full((4, 10), -1, dtype=np.int32)
+    assignments[:, 0] = 7
+    target_keys = np.zeros((4, 88), dtype=np.float32)
+    target_keys[1:3, 7] = 1.0
+    active, inactive = assignment_masks(assignments, target_keys=target_keys, total_steps=4)
+    np.testing.assert_array_equal(active[:, 0], np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32))
+    np.testing.assert_array_equal(inactive[:, 0], np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32))
+
+
 def test_normalize_bagatelle_metadata_adds_dense_fields() -> None:
     metadata = {
         "waypoint_frames": np.array([0, 2], dtype=np.int32),

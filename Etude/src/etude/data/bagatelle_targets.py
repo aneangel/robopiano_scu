@@ -32,7 +32,11 @@ def normalize_bagatelle_metadata(
         strict=strict,
     )
     if assignments is not None:
-        active_mask, inactive_mask = assignment_masks(assignments)
+        active_mask, inactive_mask = assignment_masks(
+            assignments,
+            target_keys=normalized.get("target_keys"),
+            total_steps=total_steps,
+        )
         normalized["active_finger_mask"] = active_mask
         normalized["inactive_finger_mask"] = inactive_mask
 
@@ -45,6 +49,9 @@ def normalize_bagatelle_metadata(
         strict=strict,
     )
     if weights is not None:
+        if "active_finger_mask" in normalized:
+            active = np.asarray(normalized["active_finger_mask"], dtype=np.float32)
+            weights = weights * active + float(default_inactive_weight) * (1.0 - active)
         normalized["fingertip_weights"] = weights
 
     target_keys = _normalize_target_keys(normalized.get("target_keys"), total_steps=total_steps, strict=strict)
@@ -94,12 +101,36 @@ def dense_fingertip_targets_from_waypoints(
     return dense
 
 
-def assignment_masks(assignments: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def assignment_masks(
+    assignments: np.ndarray,
+    *,
+    target_keys: np.ndarray | None = None,
+    total_steps: int | None = None,
+    active_threshold: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
     array = np.asarray(assignments, dtype=np.float32)
     if array.ndim != 2 or array.shape[1] != 10:
         raise ValueError(f"assignments must have shape [T, 10], got {array.shape}")
-    active = (array >= 0.0).astype(np.float32)
+    if target_keys is None:
+        active = (array >= 0.0).astype(np.float32)
+        inactive = (array < 0.0).astype(np.float32)
+        return active, inactive
+    target = _normalize_target_keys(target_keys, total_steps=total_steps or array.shape[0], strict=True)
+    if target is None:
+        active = (array >= 0.0).astype(np.float32)
+        inactive = (array < 0.0).astype(np.float32)
+        return active, inactive
+    if target.shape[0] != array.shape[0]:
+        raise ValueError(
+            f"target_keys length {target.shape[0]} must match assignments length {array.shape[0]}"
+        )
+    active = np.zeros_like(array, dtype=np.float32)
+    valid = array >= 0.0
+    key_indices = np.clip(array.astype(np.int64), 0, target.shape[1] - 1)
+    row_indices = np.arange(array.shape[0], dtype=np.int64)[:, None]
+    active[valid] = (target[row_indices, key_indices][valid] > float(active_threshold)).astype(np.float32)
     inactive = (array < 0.0).astype(np.float32)
+    inactive = np.maximum(inactive, 1.0 - active).astype(np.float32)
     return active, inactive
 
 

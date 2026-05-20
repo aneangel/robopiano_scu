@@ -12,6 +12,7 @@ def test_bagatelle_refinement_configs_load() -> None:
         config = load_experiment_config(Path("configs/experiments") / name)
         assert "controller" in config
         assert "training" in config
+        assert "refinement" in config
 
 
 def test_bagatelle_refinement_scripts_help() -> None:

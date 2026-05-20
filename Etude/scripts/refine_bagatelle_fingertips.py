@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
-from typing import Any
 
 import yaml
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Refine an Etude fingertip residual controller against Bagatelle targets."
+        description="Fine-tune a Bagatelle-conditioned residual correction head on top of an existing Etude follower."
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--init-checkpoint", required=True)
@@ -34,106 +32,195 @@ def main() -> None:
     from etude.experiments import load_experiment_config
     from etude.data.trajectory_io import load_qpos_trajectory
     from etude.evaluation.rollout import rollout_controller
-    from etude.evaluation.metrics import action_metrics, joint_metrics
-    from etude.evaluation.event_metrics import EventMetricsConfig, compute_event_metrics
-    from etude.evaluation.fingertip_metrics import compute_fingertip_assignment_metrics
-    from etude.evaluation.tracker_eval_utils import build_tracker_controller
+    from etude.evaluation.tracker_eval_utils import build_tracker_controller_from_checkpoint_payload
     from etude.robopianist.env_factory import make_robopianist_env
     from etude.robopianist.state_mapping import resolve_mapping_from_env
+    from etude.training.bagatelle_refinement import (
+        build_refinement_checkpoint,
+        build_refinement_controller,
+        build_stage1_training_batch,
+        create_or_validate_correction_model,
+        determine_feature_dim,
+        evaluate_refinement_candidate,
+        load_refinement_state,
+        train_refinement_epoch,
+    )
+    from etude.evaluation.tracker_eval_utils import resolve_device
+
+    config = load_experiment_config(Path(args.config))
+    trajectory = load_qpos_trajectory(args.trajectory)
+    state = load_refinement_state(args.init_checkpoint)
 
     output_root = Path(args.output_root)
     checkpoint_dir = output_root / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    config = load_experiment_config(Path(args.config))
-    trajectory = load_qpos_trajectory(args.trajectory)
-    checkpoint = torch.load(Path(args.init_checkpoint), map_location="cpu")
-    _validate_checkpoint_family(config, checkpoint)
+    env = make_robopianist_env()
+    mapping = resolve_mapping_from_env(env)
+    base_controller = build_tracker_controller_from_checkpoint_payload(mapping, state.base_checkpoint)
+    base_rollout = rollout_controller(
+        env,
+        base_controller,
+        mapping,
+        np.asarray(trajectory["q_ref"], dtype=np.float32),
+        np.asarray(trajectory["qdot_ref"], dtype=np.float32),
+        metadata=trajectory.get("metadata"),
+    )
+    feature_dim = determine_feature_dim(config, base_rollout, trajectory.get("metadata", {}))
+    close_fn = getattr(env, "close", None)
+    if callable(close_fn):
+        close_fn()
+    correction_model = create_or_validate_correction_model(
+        config=config,
+        state=state,
+        feature_dim=feature_dim,
+        action_dim=mapping.action_dim,
+    )
+    device = torch.device(resolve_device(config.get("controller", {}), config))
+    correction_model.to(device)
 
     env = make_robopianist_env()
     mapping = resolve_mapping_from_env(env)
-    controller = build_tracker_controller(mapping, config, checkpoint_path=args.init_checkpoint)
-    rollout = rollout_controller(
+    controller = build_refinement_controller(mapping, config, state, correction_model)
+    best_metrics, best_rollout = evaluate_refinement_candidate(
         env,
         controller,
         mapping,
-        trajectory["q_ref"],
-        trajectory["qdot_ref"],
-        metadata=trajectory.get("metadata"),
+        trajectory,
+        config,
+        stage="fingertip",
     )
-    metrics = _compute_metrics(rollout, trajectory)
+    best_state_dict = {key: value.detach().cpu().clone() for key, value in correction_model.state_dict().items()}
+    history = [{"epoch": 0, "train_loss": 0.0, "metrics": best_metrics}]
 
-    shutil.copy2(args.init_checkpoint, checkpoint_dir / "best_fingertip_refined.pt")
+    optimizer = torch.optim.AdamW(
+        correction_model.parameters(),
+        lr=float(config["training"].get("lr", 1.0e-5)),
+        weight_decay=float(config["training"].get("weight_decay", 1.0e-5)),
+    )
+    batch_size = int(config.get("training", {}).get("batch_size", 64))
+    residual_l2_weight = float(config.get("training", {}).get("residual_l2_weight", 0.05))
+
+    for epoch in range(1, int(config["training"].get("epochs", 5)) + 1):
+        train_rollout = best_rollout if epoch == 1 else evaluate_refinement_candidate(
+            env,
+            controller,
+            mapping,
+            trajectory,
+            config,
+            stage="fingertip",
+        )[1]
+        features, targets = build_stage1_training_batch(
+            controller,
+            train_rollout,
+            trajectory,
+            mapping.action_dim,
+            gain=float(config.get("refinement", {}).get("heuristic_gain", 0.25)),
+            error_scale_cm=float(config.get("refinement", {}).get("error_scale_cm", 2.0)),
+        )
+        train_loss = train_refinement_epoch(
+            correction_model,
+            optimizer,
+            features,
+            targets,
+            batch_size=batch_size,
+            device=device,
+            residual_l2_weight=residual_l2_weight,
+        )
+        metrics, rollout = evaluate_refinement_candidate(
+            env,
+            controller,
+            mapping,
+            trajectory,
+            config,
+            stage="fingertip",
+        )
+        history.append({"epoch": epoch, "train_loss": train_loss, "metrics": metrics})
+        if _is_better(metrics, best_metrics, primary="fingertip/active_l2_mean", mode="min", ties=(
+            "piano/false_events",
+            "control/action_l2",
+            "tracking/joint_mse",
+        )):
+            best_metrics = metrics
+            best_rollout = rollout
+            best_state_dict = {key: value.detach().cpu().clone() for key, value in correction_model.state_dict().items()}
+
+    correction_model.load_state_dict(best_state_dict)
+    checkpoint = build_refinement_checkpoint(
+        stage="fingertip",
+        config=config,
+        state=state,
+        model=correction_model,
+        input_dim=feature_dim,
+        action_dim=mapping.action_dim,
+        metrics=best_metrics,
+    )
+    torch.save(checkpoint, checkpoint_dir / "best_fingertip_refined.pt")
+
     output_root.mkdir(parents=True, exist_ok=True)
-    (output_root / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (output_root / "metrics.json").write_text(json.dumps(best_metrics, indent=2), encoding="utf-8")
     (output_root / "config_resolved.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-    np.savez_compressed(output_root / "rollout.npz", **rollout)
-    (output_root / "summary.md").write_text(_summary_markdown(metrics, args), encoding="utf-8")
+    np.savez_compressed(output_root / "rollout.npz", **best_rollout)
+    (output_root / "summary.md").write_text(_summary_markdown(best_metrics, args, history), encoding="utf-8")
+
+    close_fn = getattr(env, "close", None)
+    if callable(close_fn):
+        close_fn()
 
 
-def _compute_metrics(rollout: dict[str, Any], trajectory: dict[str, Any]) -> dict[str, float]:
-    import numpy as np
-
-    metrics = joint_metrics(
-        np.asarray(rollout["q"], dtype=np.float32),
-        np.asarray(trajectory["q_ref"], dtype=np.float32)[: np.asarray(rollout["q"]).shape[0]],
-        np.asarray(rollout["qdot"], dtype=np.float32),
-        np.asarray(trajectory["qdot_ref"], dtype=np.float32)[: np.asarray(rollout["qdot"]).shape[0]],
-    )
-    metrics.update(action_metrics(np.asarray(rollout["actions"], dtype=np.float32), None, None))
-
-    current = rollout.get("fingertips")
-    desired = rollout.get("desired_fingertips", trajectory.get("metadata", {}).get("desired_fingertips"))
-    if current is not None and desired is not None:
-        metrics.update(
-            compute_fingertip_assignment_metrics(
-                np.asarray(current, dtype=np.float32),
-                np.asarray(desired, dtype=np.float32),
-                active_finger_mask=rollout.get(
-                    "active_finger_mask",
-                    trajectory.get("metadata", {}).get("active_finger_mask"),
-                ),
-            )
-        )
-
-    predicted = rollout.get("key_state")
-    target = trajectory.get("metadata", {}).get("target_keys")
-    if predicted is not None and target is not None:
-        pred = np.asarray(predicted, dtype=np.float32)
-        tgt = np.asarray(target, dtype=np.float32)[: pred.shape[0]]
-        metrics.update(
-            compute_event_metrics(
-                pred,
-                tgt,
-                EventMetricsConfig(dt=float(trajectory.get("dt", 0.005))),
-            )
-        )
-    return {key: float(value) for key, value in metrics.items()}
+def _is_better(
+    candidate: dict[str, float],
+    incumbent: dict[str, float],
+    *,
+    primary: str,
+    mode: str,
+    ties: tuple[str, ...],
+) -> bool:
+    candidate_primary = float(candidate.get(primary, float("inf") if mode == "min" else float("-inf")))
+    incumbent_primary = float(incumbent.get(primary, float("inf") if mode == "min" else float("-inf")))
+    if mode == "min":
+        if candidate_primary < incumbent_primary:
+            return True
+        if candidate_primary > incumbent_primary:
+            return False
+    else:
+        if candidate_primary > incumbent_primary:
+            return True
+        if candidate_primary < incumbent_primary:
+            return False
+    for key in ties:
+        c = float(candidate.get(key, float("inf")))
+        i = float(incumbent.get(key, float("inf")))
+        if c < i:
+            return True
+        if c > i:
+            return False
+    return False
 
 
-def _summary_markdown(metrics: dict[str, float], args: argparse.Namespace) -> str:
+def _summary_markdown(metrics: dict[str, float], args: argparse.Namespace, history: list[dict[str, object]]) -> str:
     primary = metrics.get("fingertip/active_l2_mean")
     lines = [
         "# Bagatelle Fingertip Refinement",
         "",
         f"- Init checkpoint: `{args.init_checkpoint}`",
         f"- Trajectory: `{args.trajectory}`",
-        "- Result: evaluated the Bagatelle-conditioned controller path and saved the selected checkpoint.",
+        f"- Candidate epochs evaluated: `{len(history)}`",
+        "- Result: trained and selected a Bagatelle-conditioned residual correction head.",
     ]
     if primary is not None:
         lines.append(f"- Primary metric `fingertip/active_l2_mean`: `{primary:.6f}`")
     return "\n".join(lines) + "\n"
 
 
-def _validate_checkpoint_family(config: dict[str, Any], checkpoint: dict[str, Any]) -> None:
-    controller_cfg = config.get("controller", {})
-    expected = str(controller_cfg.get("family") or controller_cfg.get("type") or "")
-    checkpoint_cfg = checkpoint.get("config", {}).get("controller", {})
-    actual = str(checkpoint_cfg.get("family") or checkpoint_cfg.get("type") or expected)
-    if expected and actual and expected != actual:
-        raise ValueError(
-            f"Checkpoint/controller family mismatch: config expects '{expected}' but checkpoint has '{actual}'"
-        )
+def _read_initial_dim(state, key: str) -> int:
+    import torch
+
+    payload = torch.load(Path(state.source_path), map_location="cpu")
+    value = payload.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Refinement checkpoint missing integer {key}")
+    return int(value)
 
 
 if __name__ == "__main__":

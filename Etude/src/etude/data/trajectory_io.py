@@ -85,6 +85,8 @@ def load_qpos_trajectory(path: str | Path) -> dict[str, Any]:
                 "waypoint_target_keys",
                 "fingertip_targets",
                 "waypoint_fingertips",
+                "assignments",
+                "assignment_costs",
                 "fingertip_trajectory_targets",
                 "fingertip_trajectory_weights",
                 "fingertip_trajectory_dense_frames",

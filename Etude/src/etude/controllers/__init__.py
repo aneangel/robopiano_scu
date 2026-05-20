@@ -1,4 +1,5 @@
 from etude.controllers.base import TrajectoryFollower
+from etude.controllers.bagatelle_residual import BagatelleResidualController
 from etude.controllers.factory import (
     SUPPORTED_CONTROLLER_FAMILIES,
     build_controller,
@@ -20,6 +21,7 @@ from etude.controllers.temporal_residual import TemporalResidualController
 
 __all__ = [
     "build_controller",
+    "BagatelleResidualController",
     "FingertipPhaseResidualController",
     "HierarchicalContactController",
     "HybridPDResidualController",
