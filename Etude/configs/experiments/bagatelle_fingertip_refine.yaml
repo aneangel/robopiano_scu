@@ -1,0 +1,56 @@
+includes:
+  - ../controller/fingertip_phase_residual.yaml
+  - ../corruption/none.yaml
+  - ../features/fingertip_phase.yaml
+
+experiment:
+  name: bagatelle_fingertip_refine
+  controller_family: fingertip_residual
+  evaluation_mode: rollout_eval
+  resource_tier: tier2_gpu_train
+
+controller:
+  family: fingertip_residual
+  residual_scale: 0.25
+  residual_limit: 0.5
+  phase_gain: 1.0
+  fingertip_control:
+    enabled: true
+    use_fingertip_error_features: true
+    use_fingertip_weights: true
+    use_active_finger_mask: true
+    use_inactive_finger_mask: true
+    allow_missing: false
+  phase:
+    source: metadata
+    encode_as: both
+    include_mask: true
+    allow_missing: true
+
+training:
+  epochs: 5
+  lr: 1.0e-5
+  weight_decay: 1.0e-5
+  device: cuda
+  eval_every: 1
+
+refinement:
+  stage: fingertip
+  selection_metric: fingertip/active_l2_mean
+  selection_mode: min
+  tie_break_metrics:
+    - piano/false_events
+    - action/l2_mean
+    - tracking/joint_pos_rmse
+
+execution:
+  kind: bagatelle_refine_fingertips
+  dry_run_support: true
+  allow_execute: true
+  requires_rollout: true
+  requires_gpu: true
+  local_batch_script: local_batch/run_etude_rollout_eval.echo
+
+output:
+  root: runs
+  subdir: refine/bagatelle_fingertips

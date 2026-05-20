@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from etude.data.bagatelle_targets import normalize_bagatelle_metadata
+
 
 def finite_difference(q_ref: np.ndarray, dt: float) -> np.ndarray:
     q_ref = np.asarray(q_ref, dtype=np.float32)
@@ -53,6 +55,18 @@ def load_qpos_trajectory(path: str | Path) -> dict[str, Any]:
             )
             metadata_json = str(np.asarray(data["metadata_json"]).item()) if "metadata_json" in data else "{}"
             metadata = json.loads(metadata_json)
+            for key in (
+                "target_keys",
+                "waypoint_frames",
+                "waypoint_target_keys",
+                "fingertip_targets",
+                "waypoint_fingertips",
+                "assignments",
+                "assignment_costs",
+                "segment_ids",
+            ):
+                if key in data and key not in metadata:
+                    metadata[key] = np.asarray(data[key])
         elif "planned_hand_joints" in data or "planned_hand_joints_dense" in data:
             dense = "planned_hand_joints_dense" in data and "planned_hand_joints" not in data
             q_key = "planned_hand_joints_dense" if dense else "planned_hand_joints"
@@ -91,6 +105,7 @@ def load_qpos_trajectory(path: str | Path) -> dict[str, Any]:
             raise KeyError(
                 "Trajectory NPZ must contain q_ref/qdot_ref or an Impromptu planned_hand_joints payload"
             )
+    metadata = normalize_bagatelle_metadata(metadata, q_ref_len=q_ref.shape[0])
     return {
         "q_ref": q_ref,
         "qdot_ref": qdot_ref,

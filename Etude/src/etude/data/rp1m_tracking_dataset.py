@@ -111,13 +111,20 @@ class RP1MTrackingDataset(Dataset):
             phase_cfg = dict(self.feature_config.get("phase_spec", {}))
             fingertips = _reshape_fingertips(episode.get("fingertips"))
             current = fingertips[t] if fingertips is not None else None
+            desired = _reshape_fingertips(episode.get("desired_fingertips"))
+            desired_t = desired[t] if desired is not None else current
+            weights = episode.get("fingertip_weights")
+            active = episode.get("active_finger_mask")
+            inactive = episode.get("inactive_finger_mask")
             return build_fingertip_phase_features(
                 t=t,
                 metadata={"dt": float(episode.get("dt", 0.005))},
                 target_keys=episode.get("target_keys"),
                 current_fingertips=current,
-                desired_fingertips=current,
-                fingertip_weights=np.ones((10,), dtype=np.float32) if current is not None and current.shape[0] == 10 else None,
+                desired_fingertips=desired_t,
+                fingertip_weights=_timestep_vector(weights, t),
+                active_finger_mask=_timestep_vector(active, t),
+                inactive_finger_mask=_timestep_vector(inactive, t),
                 fingertip_spec=FingertipFeatureSpec(**fingertip_cfg) if fingertip_cfg else None,
                 phase_spec=PhaseFeatureSpec(**phase_cfg) if phase_cfg else None,
             )
@@ -147,4 +154,15 @@ def _reshape_fingertips(value: np.ndarray | None) -> np.ndarray | None:
         return array
     if array.ndim == 2 and array.shape[1] % 3 == 0:
         return array.reshape(array.shape[0], array.shape[1] // 3, 3).astype(np.float32)
+    return None
+
+
+def _timestep_vector(value: np.ndarray | None, t: int) -> np.ndarray | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    if array.ndim == 1:
+        return array.astype(np.float32)
+    if array.ndim == 2 and array.shape[0] > 0:
+        return array[min(int(t), array.shape[0] - 1)].astype(np.float32)
     return None

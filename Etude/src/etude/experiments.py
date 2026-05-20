@@ -231,6 +231,36 @@ def build_command(config: dict[str, Any], *, execution_kind: str, output_dir: Pa
             command.append("--render-video")
         return command
 
+    if execution_kind == "bagatelle_refine_fingertips":
+        args = _as_dict(execution.get("args"))
+        return [
+            python_exe,
+            "scripts/refine_bagatelle_fingertips.py",
+            "--config",
+            config_placeholder,
+            "--init-checkpoint",
+            str(args.get("init_checkpoint", "CHANGE_ME")),
+            "--trajectory",
+            str(args.get("trajectory", "CHANGE_ME")),
+            "--output-root",
+            output_dir_str,
+        ]
+
+    if execution_kind == "bagatelle_refine_keypress_temporal":
+        args = _as_dict(execution.get("args"))
+        return [
+            python_exe,
+            "scripts/refine_keypress_temporal.py",
+            "--config",
+            config_placeholder,
+            "--init-checkpoint",
+            str(args.get("init_checkpoint", "CHANGE_ME")),
+            "--trajectory",
+            str(args.get("trajectory", "CHANGE_ME")),
+            "--output-root",
+            output_dir_str,
+        ]
+
     return []
 
 
