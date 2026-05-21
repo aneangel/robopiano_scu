@@ -21,6 +21,6 @@ Make changes to modules f and g by exploring h that works like ...
 
 ## Chat
 
-### Users
+### User
 
 Append a new response to this chat by saying hello world following the example structure.
