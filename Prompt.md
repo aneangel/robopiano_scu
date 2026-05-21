@@ -1,6 +1,6 @@
 # This is a chat between an autonomous agent and a remote user
 
-As a remote user you should regularly check this file to read the User's notes so that the user can guide your work and get a feel for how you are performing.
+As a research agent you should regularly check this file to read the remote user's notes so that the user can guide your work and get a feel for how you are performing.
 
 ## Example:
 
