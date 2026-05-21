@@ -29,8 +29,8 @@ segmentation:
   min_segment_len: 4
   max_segment_len: 32
   use_goal_boundaries: true
-  use_piano_state_boundaries: true
-  use_action_derivative_boundaries: true
+  use_piano_state_boundaries: false
+  use_action_derivative_boundaries: false
   action_derivative_percentile: 90
 
 primitives:
@@ -45,6 +45,34 @@ primitives:
 reconstruction:
   mode: nearest
   target_trajectory_rank: 0
+
+rollout:
+  reduced_action_space: true
+  action_source_scale: normalized_minus_one_to_one
+  action_mapping: as_is
+  require_exact_action_dim: true
+  restore_initial_state: true
+  prefer_canonical_midi: true
+  # Match defaults of robopianist.suite.tasks.PianoWithShadowHands so MJCF / dynamics align
+  # with what RP1M was collected against. Override individual entries if a song was collected
+  # with different flags. Anything left null falls back to RoboPianist defaults.
+  task_kwargs:
+    n_steps_lookahead: 1
+    trim_silence: false
+    initial_buffer_time: 0.0
+    wrong_press_termination: false
+    disable_fingering_reward: false
+    disable_forearm_reward: false
+    disable_colorization: false
+    disable_hand_collisions: false
+    energy_penalty_coef: 0.005
+    randomize_hand_positions: false
+    gravity_compensation: false
+    primitive_fingertip_collisions: false
+  suite_load_kwargs:
+    stretch: 1.0
+    shift: 0
+    legacy_step: true
 
 outputs:
   root: partita/outputs

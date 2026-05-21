@@ -59,12 +59,15 @@ def main() -> None:
 
     actions = np.asarray(target["actions"], dtype=np.float32)
     recon_actions = np.zeros_like(actions, dtype=np.float32)
-    recon_piano = None
-    if "piano_states" in target:
-        recon_piano = np.zeros_like(np.asarray(target["piano_states"], dtype=np.float32), dtype=np.float32)
-    recon_hand_joints = None
-    if "hand_joints" in target:
-        recon_hand_joints = np.zeros_like(np.asarray(target["hand_joints"], dtype=np.float32), dtype=np.float32)
+    for stale_name in [
+        "reconstructed_piano_states.npy",
+        "original_piano_states.npy",
+        "reconstructed_hand_joints.npy",
+        "original_hand_joints.npy",
+    ]:
+        stale_path = recon_dir / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
     timeline_rows = []
     for _, row in assignments.iterrows():
         start = int(row["start_t"])
@@ -73,22 +76,10 @@ def main() -> None:
         pid = int(row["primitive_id"])
         primitive = library["primitives"][pid]
         recon_actions[start:end] = resample_array(primitive["mean_action_trajectory"], duration)[:, : actions.shape[-1]]
-        if recon_piano is not None and primitive.get("mean_piano_state_profile") is not None:
-            piano = resample_array(primitive["mean_piano_state_profile"], duration)
-            recon_piano[start:end] = piano[:, : recon_piano.shape[-1]]
-        if recon_hand_joints is not None and primitive.get("mean_hand_joint_profile") is not None:
-            hand_joints = resample_array(primitive["mean_hand_joint_profile"], duration)
-            recon_hand_joints[start:end] = hand_joints[:, : recon_hand_joints.shape[-1]]
         timeline_rows.append({"start_t": start, "end_t": end, "duration": duration, "primitive_id": pid})
 
     np.save(recon_dir / "reconstructed_actions.npy", recon_actions)
     np.save(recon_dir / "original_actions.npy", actions)
-    if recon_piano is not None:
-        np.save(recon_dir / "reconstructed_piano_states.npy", recon_piano)
-        np.save(recon_dir / "original_piano_states.npy", np.asarray(target["piano_states"], dtype=np.float32))
-    if recon_hand_joints is not None:
-        np.save(recon_dir / "reconstructed_hand_joints.npy", recon_hand_joints)
-        np.save(recon_dir / "original_hand_joints.npy", np.asarray(target["hand_joints"], dtype=np.float32))
     save_csv(recon_dir / "primitive_timeline.csv", pd.DataFrame(timeline_rows))
     save_action_comparison(actions, recon_actions, recon_dir / "original_vs_reconstructed_actions.png")
     print(f"Saved reconstruction outputs to {recon_dir}")

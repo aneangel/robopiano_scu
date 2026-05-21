@@ -15,7 +15,12 @@ import pandas as pd
 from sonata.data.loading import build_manifest_lookup, load_stage1_source_manifest
 from sonata.evaluation.offline import stitch_segment_predictions
 from sonata.evaluation.causal_rollout_contract import CausalRolloutConfig, reset_or_validate_neutral_piano
-from sonata.evaluation.task_config import build_rollout_task_kwargs, validate_rollout_action_dim
+from sonata.evaluation.task_config import (
+    adapt_action_to_spec,
+    build_rollout_task_kwargs,
+    rollout_action_source_scale,
+    validate_rollout_action_dim,
+)
 from sonata.training.mjx_rollout import MJXRolloutBackend, mjx_availability
 from sonata.utils.io import write_json, write_table
 from sonata.utils.robopianist import ensure_local_robopianist_on_path, format_robopianist_import_error
@@ -116,7 +121,9 @@ def evaluate_dm_control_rollout(
                     f"{neutral_check.initial_active_key_indices}"
                 )
             total_reward = 0.0
-            action_dim = int(env.action_spec().shape[0])
+            action_spec = env.action_spec()
+            action_dim = int(action_spec.shape[0])
+            action_source_scale = rollout_action_source_scale()
             validate_rollout_action_dim(
                 actual_action_dim=action_dim,
                 expected_action_dim=expected_action_dim,
@@ -132,8 +139,7 @@ def evaluate_dm_control_rollout(
                     logger.warning("Initial render failed for DM Control episode `%s`: %s", episode_id, exc)
             actions_executed = 0
             for action in stitched:
-                control = np.zeros((action_dim,), dtype=np.float32)
-                control[: min(action_dim, action.shape[0])] = action[: min(action_dim, action.shape[0])]
+                control = adapt_action_to_spec(action, action_spec, source_scale=action_source_scale)
                 timestep = env.step(control)
                 total_reward += float(timestep.reward or 0.0)
                 actions_executed += 1
@@ -179,6 +185,7 @@ def evaluate_dm_control_rollout(
                 "reward": total_reward,
                 "actions_planned": int(stitched.shape[0]),
                 "actions_executed": actions_executed,
+                "action_source_scale": action_source_scale,
                 "terminated": bool(timestep.last()),
                 "render_attempted": bool(should_render),
                 "rendered_frames": int(len(frames)) if should_render else 0,

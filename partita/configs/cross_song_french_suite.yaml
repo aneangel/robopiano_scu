@@ -1,0 +1,73 @@
+rp1m_root: /WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
+robopiano_root: /WAVE/projects/ECEN-524-Wi26/robopiano
+robopianist_root: /WAVE/projects/ECEN-524-Wi26/robopiano/robopianist
+
+experiment_name: partita_sarabande_to_allemande_cross_song
+
+source_song_name: RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0
+target_song_name: RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0_0
+song_name: null
+
+song_search_terms:
+  - FrenchSuiteNo5Sarabande
+  - FrenchSuiteNo5
+  - Sarabande
+  - FrenchSuiteNo1Allemande
+
+selection:
+  top_k_train: 64
+  reconstruction_rank: 0
+  exclude_reconstruction_from_training: true
+  min_key_f1: 0.85
+  max_mispress_rate: 0.15
+  key_threshold: 0.5
+  fallback_scan_songs: 50
+
+segmentation:
+  min_segment_len: 4
+  max_segment_len: 32
+  use_goal_boundaries: true
+  use_piano_state_boundaries: false
+  use_action_derivative_boundaries: false
+  action_derivative_percentile: 90
+
+primitives:
+  num_primitives: 32
+  pca_dim: 24
+  resample_len: 16
+  cluster_method: kmeans
+  random_seed: 42
+  include_relative_song_time: true
+  relative_song_time_weight: 0.0
+
+reconstruction:
+  mode: nearest
+  target_trajectory_rank: 0
+
+rollout:
+  reduced_action_space: true
+  action_source_scale: normalized_minus_one_to_one
+  action_mapping: as_is
+  require_exact_action_dim: true
+  restore_initial_state: true
+  prefer_canonical_midi: true
+  task_kwargs:
+    n_steps_lookahead: 1
+    trim_silence: false
+    initial_buffer_time: 0.0
+    wrong_press_termination: false
+    disable_fingering_reward: false
+    disable_forearm_reward: false
+    disable_colorization: false
+    disable_hand_collisions: false
+    energy_penalty_coef: 0.005
+    randomize_hand_positions: false
+    gravity_compensation: false
+    primitive_fingertip_collisions: false
+  suite_load_kwargs:
+    stretch: 1.0
+    shift: 0
+    legacy_step: true
+
+outputs:
+  root: partita/outputs

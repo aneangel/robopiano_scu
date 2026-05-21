@@ -25,21 +25,32 @@ def main() -> None:
     selection = load_json(data_dir / "selection.json")
     train_ids = [int(x) for x in load_json(data_dir / "train_trajectory_ids.json")]
     target = load_json(data_dir / "reconstruction_target.json")
-    song_name = selection["song_name"]
+    source_song_name = selection.get("source_song_name", selection["song_name"])
+    target_song_name = selection.get("target_song_name", target.get("song_name", source_song_name))
 
     root = open_rp1m_root(selection["rp1m_root"])
-    song_group = root[song_name]
-    arrays = [a for a in available_arrays(song_group) if a in {"actions", "goals", "piano_states", "hand_joints", "hand_fingertips"}]
-    if "actions" not in arrays:
-        raise RuntimeError(f"Song {song_name} does not contain required actions array.")
+    source_group = root[source_song_name]
+    target_group = root[target_song_name]
+    keep_arrays = {"actions", "goals", "piano_states", "hand_joints", "hand_fingertips"}
+    source_arrays = [a for a in available_arrays(source_group) if a in keep_arrays]
+    target_arrays = [a for a in available_arrays(target_group) if a in keep_arrays]
+    if "actions" not in source_arrays:
+        raise RuntimeError(f"Source song {source_song_name} does not contain required actions array.")
+    if "actions" not in target_arrays:
+        raise RuntimeError(f"Target song {target_song_name} does not contain required actions array.")
 
-    selected = read_trajectories(song_group, train_ids, arrays=arrays)
-    target_data = read_trajectory(song_group, int(target["trajectory_id"]), arrays=arrays)
+    selected = read_trajectories(source_group, train_ids, arrays=source_arrays)
+    target_data = read_trajectory(target_group, int(target["trajectory_id"]), arrays=target_arrays)
     np.savez_compressed(data_dir / "selected_trajectories.npz", **selected)
     np.savez_compressed(data_dir / "target_trajectory.npz", **target_data)
     summary = {
-        "song_name": song_name,
-        "available_arrays": arrays,
+        "song_name": source_song_name,
+        "source_song_name": source_song_name,
+        "target_song_name": target_song_name,
+        "is_cross_song": source_song_name != target_song_name,
+        "source_available_arrays": source_arrays,
+        "target_available_arrays": target_arrays,
+        "available_arrays": source_arrays,
         "num_training_trajectories": len(train_ids),
         "train_trajectory_ids": train_ids,
         "target_trajectory_id": int(target["trajectory_id"]),

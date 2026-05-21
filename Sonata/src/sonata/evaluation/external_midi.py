@@ -26,7 +26,12 @@ from sonata.evaluation.rollout import (
     _summarize_rollout_results,
     _write_rollout_video,
 )
-from sonata.evaluation.task_config import build_rollout_task_kwargs, validate_rollout_action_dim
+from sonata.evaluation.task_config import (
+    adapt_action_to_spec,
+    build_rollout_task_kwargs,
+    rollout_action_source_scale,
+    validate_rollout_action_dim,
+)
 from sonata.models.pipeline import Sonata3Pipeline
 from sonata.transformer.decode import decode_factored_outputs
 from sonata.transformer.dataset import build_goal_context, build_history_context, planner_collate_fn
@@ -193,7 +198,9 @@ def evaluate_external_midi_benchmark(
                     "Causal external MIDI rollout failed neutral piano start validation: "
                     f"{neutral_check.initial_active_key_indices}"
                 )
-            action_dim = int(env.action_spec().shape[0])
+            action_spec = env.action_spec()
+            action_dim = int(action_spec.shape[0])
+            action_source_scale = rollout_action_source_scale()
             validate_rollout_action_dim(
                 actual_action_dim=action_dim,
                 expected_action_dim=int(metadata.action_dim),
@@ -280,9 +287,7 @@ def evaluate_external_midi_benchmark(
                 segment_actions = resample_prediction(predicted_chunk, duration_steps)
                 segment_joint_trace = [current_joint]
                 for action in segment_actions:
-                    control = np.zeros((action_dim,), dtype=np.float32)
-                    usable_dim = min(control.shape[0], action.shape[0])
-                    control[:usable_dim] = action[:usable_dim]
+                    control = adapt_action_to_spec(action, action_spec, source_scale=action_source_scale)
                     timestep = env.step(control)
                     total_reward += float(timestep.reward or 0.0)
                     actions_executed += 1
@@ -367,6 +372,7 @@ def evaluate_external_midi_benchmark(
                 "segments_planned": int(len(base_rows)),
                 "segments_executed": int(segments_executed),
                 "actions_executed": int(actions_executed),
+                "action_source_scale": action_source_scale,
                 "terminated": bool(timestep.last()),
                 "render_attempted": bool(should_render),
                 "rendered_frames": int(len(frames)) if should_render else 0,

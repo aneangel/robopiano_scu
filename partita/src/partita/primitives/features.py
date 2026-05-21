@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+FEATURE_MODE = "goal_conditioned_v1"
+
 
 def resample_array(arr, length: int) -> np.ndarray:
     x = np.asarray(arr, dtype=np.float32)
@@ -35,25 +37,22 @@ def segment_feature(data: dict[str, np.ndarray], row, include_relative_song_time
     traj_idx = int(row["trajectory_index"])
     start = int(row["start_t"])
     end = int(row["end_t"])
-    actions = np.asarray(data["actions"][traj_idx, start:end], dtype=np.float32)
+    if "goals" not in data:
+        raise RuntimeError("Goal-conditioned Partita features require a goals array.")
+    goals = np.asarray(data["goals"][traj_idx, start:end], dtype=np.float32)
     feats: list[float] = []
     names: list[str] = []
 
-    vals, ns = _stats("action", actions)
+    vals, ns = _stats("goal", goals)
     feats.extend(vals); names.extend(ns)
-    delta = actions[-1] - actions[0] if actions.shape[0] else np.zeros(data["actions"].shape[-1], dtype=np.float32)
+    delta = goals[-1] - goals[0] if goals.shape[0] else np.zeros(data["goals"].shape[-1], dtype=np.float32)
     feats.extend(delta.astype(np.float32).tolist())
-    names.extend([f"action_delta_{i}" for i in range(delta.shape[0])])
-    feats.extend([float(row.get("action_energy", np.mean(actions * actions))), float(row["duration"])])
-    names.extend(["action_energy", "duration"])
-
-    for key, prefix in [("goals", "goal"), ("piano_states", "piano"), ("hand_joints", "joint"), ("hand_fingertips", "fingertip")]:
-        if key in data:
-            vals, ns = _stats(prefix, data[key][traj_idx, start:end])
-            feats.extend(vals); names.extend(ns)
+    names.extend([f"goal_delta_{i}" for i in range(delta.shape[0])])
+    feats.extend([float(row["duration"]), float(row.get("num_goal_keys", 0.0))])
+    names.extend(["duration", "num_goal_keys"])
 
     if include_relative_song_time:
-        total_t = max(int(data["actions"].shape[1]), 1)
+        total_t = max(int(data["goals"].shape[1]), 1)
         feats.append(float(start) / total_t * float(relative_song_time_weight))
         names.append("relative_song_time_weighted")
     return np.asarray(feats, dtype=np.float32), names
@@ -76,8 +75,9 @@ def features_for_segments(data: dict[str, np.ndarray], segments: pd.DataFrame, i
 
 
 def feature_for_target_segment(traj: dict[str, np.ndarray], row, feature_names: list[str], include_relative_song_time: bool, relative_song_time_weight: float) -> np.ndarray:
-    data = {k: v[None, ...] for k, v in traj.items() if isinstance(v, np.ndarray) and k != "trajectory_id" and np.asarray(v).ndim >= 2}
-    data["actions"] = np.asarray(traj["actions"])[None, ...]
+    if "goals" not in traj:
+        raise RuntimeError("Target trajectory does not contain goals; cannot assign goal-conditioned primitives.")
+    data = {"goals": np.asarray(traj["goals"])[None, ...]}
     row = dict(row)
     row["trajectory_index"] = 0
     vec, names = segment_feature(data, row, include_relative_song_time, relative_song_time_weight)

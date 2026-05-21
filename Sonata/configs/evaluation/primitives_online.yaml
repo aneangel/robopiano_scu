@@ -48,6 +48,9 @@ causal_eval:
 
 rollout:
   validate_action_dim: true
+  reduced_action_space: true
+  action_source_scale: normalized_minus_one_to_one
+  require_exact_action_dim: true
   restore_mode: hands_only
   video_audio_source: none
   render_video: false

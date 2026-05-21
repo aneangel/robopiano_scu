@@ -26,7 +26,12 @@ from sonata.evaluation.causal_rollout_contract import (
     reset_or_validate_neutral_piano,
     run_zero_action_ablation,
 )
-from sonata.evaluation.task_config import build_rollout_task_kwargs, validate_rollout_action_dim
+from sonata.evaluation.task_config import (
+    adapt_action_to_spec,
+    build_rollout_task_kwargs,
+    rollout_action_source_scale,
+    validate_rollout_action_dim,
+)
 from sonata.primitives.features import build_feature_vector_from_arrays, load_feature_matrix_from_store
 from sonata.utils.io import ensure_dir, read_json, save_npz, write_json, write_table
 from sonata.utils.robopianist import ensure_local_robopianist_on_path, format_robopianist_import_error
@@ -166,6 +171,7 @@ class PrimitiveOnlineRolloutResult:
     target_source: str = "goals"
     observed_source: str = "simulator_piano_activation"
     action_max_abs: float = float("nan")
+    action_source_scale: str = "normalized_minus_one_to_one"
     hand_action_max_abs: float = float("nan")
     pedal_action_max_abs: float = float("nan")
     pedal_action_indices: tuple[int, ...] = ()
@@ -203,7 +209,7 @@ class RoboPianistPrimitiveRuntime:
         self.seed = int(seed)
         self.logger = logger or LOGGER
         self._suite = None
-        self._env_cache: dict[tuple[str, str | None, float, int], Any] = {}
+        self._env_cache: dict[tuple[str, str | None, float, int, bool | None], Any] = {}
 
     def preflight(self) -> tuple[bool, str | None]:
         ensure_local_robopianist_on_path(self.robopianist_root)
@@ -221,6 +227,7 @@ class RoboPianistPrimitiveRuntime:
         midi_file: Path | None,
         control_timestep: float,
         expected_action_dim: int,
+        reduced_action_space: bool | None = None,
     ) -> Any:
         if self._suite is None:
             available, error = self.preflight()
@@ -231,6 +238,7 @@ class RoboPianistPrimitiveRuntime:
             str(midi_file.resolve()) if midi_file is not None else None,
             float(control_timestep),
             int(expected_action_dim),
+            None if reduced_action_space is None else bool(reduced_action_space),
         )
         env = self._env_cache.get(key)
         if env is not None:
@@ -242,6 +250,7 @@ class RoboPianistPrimitiveRuntime:
             task_kwargs=build_rollout_task_kwargs(
                 control_timestep=float(control_timestep),
                 expected_action_dim=int(expected_action_dim),
+                reduced_action_space=reduced_action_space,
             ),
         )
         self._env_cache[key] = env
@@ -959,6 +968,7 @@ def rollout_primitive_instance(
             midi_file=source["midi_file"],
             control_timestep=float(instance.control_timestep),
             expected_action_dim=expected_action_dim,
+            reduced_action_space=rollout_config.get("reduced_action_space"),
         )
         action_dim = int(env.action_spec().shape[0])
         if bool(rollout_config.get("validate_action_dim", True)):
@@ -966,6 +976,7 @@ def rollout_primitive_instance(
                 actual_action_dim=action_dim,
                 expected_action_dim=expected_action_dim,
                 environment_name=str(source["environment_name"]),
+                require_exact=bool(rollout_config.get("require_exact_action_dim", True)),
             )
         action_diag = _action_diagnostics(predicted_actions, action_dim=action_dim, rollout_config=rollout_config)
         render_video = bool(rollout_config.get("render_video", False))
@@ -1127,6 +1138,7 @@ def rollout_primitive_instance(
             target_source=instance.target_source,
             observed_source="simulator_piano_activation",
             action_max_abs=float(action_diag["action_max_abs"]),
+            action_source_scale=str(action_diag["action_source_scale"]),
             hand_action_max_abs=float(action_diag["hand_action_max_abs"]),
             pedal_action_max_abs=float(action_diag["pedal_action_max_abs"]),
             pedal_action_indices=tuple(action_diag["pedal_action_indices"]),
@@ -1256,10 +1268,10 @@ def _execute_action_rollout(
             notes.append(f"Initial render failed: {exc}")
     status = "completed"
     error = None
+    action_spec = env.action_spec()
+    source_scale = rollout_action_source_scale(rollout_config)
     for step_index, action in enumerate(np.asarray(actions, dtype=np.float32), start=1):
-        control = np.zeros((int(action_dim),), dtype=np.float32)
-        width = min(int(action_dim), int(action.shape[0]))
-        control[:width] = action[:width]
+        control = adapt_action_to_spec(action, action_spec, source_scale=source_scale)
         timestep = env.step(control)
         piano_frames.append(_capture_piano_state(env))
         hand_frames.append(_capture_hand_joint_state(env))
@@ -1324,6 +1336,7 @@ def _action_diagnostics(actions: np.ndarray, *, action_dim: int, rollout_config:
             "hand_action_max_abs": 0.0,
             "pedal_action_max_abs": 0.0,
             "pedal_action_indices": [],
+            "action_source_scale": rollout_action_source_scale(rollout_config),
         }
     pedal_indices = _pedal_action_indices(action_dim=action_dim, rollout_config=rollout_config)
     hand_indices = [index for index in range(min(int(action_dim), array.shape[-1])) if index not in set(pedal_indices)]
@@ -1334,6 +1347,7 @@ def _action_diagnostics(actions: np.ndarray, *, action_dim: int, rollout_config:
         "hand_action_max_abs": float(np.max(np.abs(hand_values))) if hand_values.size else 0.0,
         "pedal_action_max_abs": float(np.max(np.abs(pedal_values))) if pedal_values.size else 0.0,
         "pedal_action_indices": pedal_indices,
+        "action_source_scale": rollout_action_source_scale(rollout_config),
     }
 
 
@@ -1656,6 +1670,7 @@ def build_instance_result_row(
         "contact_gated_success": bool(causal_metrics.get("contact_gated_success", False)),
         "contact_method": str(causal_metrics.get("contact_method", rollout.contact_method)),
         "action_max_abs": float(rollout.action_max_abs),
+        "action_source_scale": str(rollout.action_source_scale),
         "hand_action_max_abs": float(rollout.hand_action_max_abs),
         "pedal_action_max_abs": float(rollout.pedal_action_max_abs),
         "video_path": rollout.video_path,
@@ -2317,6 +2332,9 @@ def _resolve_eval_config(config: dict[str, Any]) -> dict[str, Any]:
     events.setdefault("piano_sustain_threshold", 0.5)
     events.setdefault("onset_tolerance_frames", 1)
     rollout.setdefault("validate_action_dim", True)
+    rollout.setdefault("reduced_action_space", True)
+    rollout.setdefault("action_source_scale", "normalized_minus_one_to_one")
+    rollout.setdefault("require_exact_action_dim", True)
     rollout.setdefault("source_mode", "dataset_song")
     rollout.setdefault("restore_mode", causal_eval["restore_mode"])
     rollout.setdefault("video_audio_source", causal_eval["video_audio_source"])

@@ -56,7 +56,6 @@ def main() -> None:
         "primitive_summary": root / "primitives" / exp / "primitive_summary.csv",
         "primitive_usage_by_trajectory": root / "primitives" / exp / "primitive_usage_by_trajectory.csv",
         "metrics": root / "evaluation" / exp / "metrics.json",
-        "pianoroll_comparison": root / "evaluation" / exp / "pianoroll_comparison.png",
     }
     print("\nPartita debug pipeline complete.")
     for name, path in paths.items():

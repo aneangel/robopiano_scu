@@ -17,38 +17,15 @@ from partita.utils.config import experiment_name, load_config, output_root
 from partita.utils.io import ensure_dir, save_csv, save_json
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Select one RP1M song and successful trajectories for Partita.")
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-    config = load_config(args.config)
-    sel_cfg = config.get("selection", {})
-    threshold = float(sel_cfg.get("key_threshold", 0.5))
-    root = open_rp1m_root(config["rp1m_root"])
-
-    selection_notes = []
-    if config.get("song_name"):
-        song_name = str(config["song_name"])
-        if song_name not in root:
-            raise RuntimeError(f"Configured song_name not found in RP1M root: {song_name}")
-        selection_meta = {"selection_mode": "configured", "chosen": {"song_name": song_name}}
-    else:
-        song_name, selection_meta = choose_best_song(
-            root,
-            list(config.get("song_search_terms", [])),
-            threshold=threshold,
-            fallback_scan_songs=int(sel_cfg.get("fallback_scan_songs", 50)),
-        )
-    print(f"Selected song: {song_name}")
-
+def _score_or_rank(root, song_name: str, threshold: float, selection_notes: list[str], note_prefix: str):
     try:
-        scores = score_song_trajectories(root[song_name], song_name, threshold=threshold)
+        return score_song_trajectories(root[song_name], song_name, threshold=threshold)
     except Exception as exc:
         n = trajectory_count(root[song_name])
-        selection_notes.append(f"Metric scoring failed ({exc}); falling back to rank by trajectory_id.")
-        scores = []
+        selection_notes.append(f"{note_prefix} metric scoring failed ({exc}); falling back to rank by trajectory_id.")
+        rows = []
         for i in range(n):
-            scores.append({
+            rows.append({
                 "song_name": song_name,
                 "trajectory_id": i,
                 "rank": i,
@@ -60,13 +37,61 @@ def main() -> None:
                 "score": -float(i),
             })
         import pandas as pd
-        scores = pd.DataFrame(scores)
+        return pd.DataFrame(rows)
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Select one RP1M song and successful trajectories for Partita.")
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+    config = load_config(args.config)
+    sel_cfg = config.get("selection", {})
+    threshold = float(sel_cfg.get("key_threshold", 0.5))
+    root = open_rp1m_root(config["rp1m_root"])
+
+    selection_notes: list[str] = []
+    if config.get("source_song_name"):
+        source_song_name = str(config["source_song_name"])
+        if source_song_name not in root:
+            raise RuntimeError(f"Configured source_song_name not found in RP1M root: {source_song_name}")
+        source_selection_meta = {"selection_mode": "configured", "chosen": {"song_name": source_song_name}}
+    elif config.get("song_name"):
+        source_song_name = str(config["song_name"])
+        if source_song_name not in root:
+            raise RuntimeError(f"Configured song_name not found in RP1M root: {source_song_name}")
+        source_selection_meta = {"selection_mode": "configured", "chosen": {"song_name": source_song_name}}
+    else:
+        source_song_name, source_selection_meta = choose_best_song(
+            root,
+            list(config.get("song_search_terms", [])),
+            threshold=threshold,
+            fallback_scan_songs=int(sel_cfg.get("fallback_scan_songs", 50)),
+        )
+
+    target_song_name = str(config.get("target_song_name") or source_song_name)
+    if target_song_name not in root:
+        raise RuntimeError(f"Configured target_song_name not found in RP1M root: {target_song_name}")
+    target_selection_meta = {
+        "selection_mode": "configured" if config.get("target_song_name") else "same_as_source",
+        "chosen": {"song_name": target_song_name},
+    }
+    is_cross_song = source_song_name != target_song_name
+    print(f"Selected source song: {source_song_name}")
+    print(f"Selected target song: {target_song_name}")
+
+    scores = _score_or_rank(root, source_song_name, threshold, selection_notes, "Source")
     scores = scores.sort_values("score", ascending=False).reset_index(drop=True)
     scores["rank"] = np.arange(len(scores), dtype=int)
+    if is_cross_song:
+        target_scores = _score_or_rank(root, target_song_name, threshold, selection_notes, "Target")
+        target_scores = target_scores.sort_values("score", ascending=False).reset_index(drop=True)
+        target_scores["rank"] = np.arange(len(target_scores), dtype=int)
+    else:
+        target_scores = scores
+
     reconstruction_rank = int(sel_cfg.get("reconstruction_rank", config.get("reconstruction", {}).get("target_trajectory_rank", 0)))
-    reconstruction_rank = min(max(reconstruction_rank, 0), len(scores) - 1)
-    target_id = int(scores.loc[reconstruction_rank, "trajectory_id"])
+    reconstruction_rank = min(max(reconstruction_rank, 0), len(target_scores) - 1)
+    target_id = int(target_scores.loc[reconstruction_rank, "trajectory_id"])
 
     filtered = scores.copy()
     min_f1 = sel_cfg.get("min_key_f1")
@@ -78,7 +103,7 @@ def main() -> None:
         keep = filtered["mispress_rate"].isna() | (filtered["mispress_rate"] <= float(max_mispress))
         filtered = filtered[keep]
 
-    if bool(sel_cfg.get("exclude_reconstruction_from_training", True)):
+    if bool(sel_cfg.get("exclude_reconstruction_from_training", True)) and not is_cross_song:
         filtered = filtered[filtered["trajectory_id"] != target_id]
 
     top_k = int(sel_cfg.get("top_k_train", 64))
@@ -94,15 +119,25 @@ def main() -> None:
         selection_notes.append("Only target trajectory available; including target in training.")
 
     scores["selected_for_training"] = scores["trajectory_id"].isin(train_ids)
-    scores["selected_as_target"] = scores["trajectory_id"] == target_id
+    scores["selected_as_target"] = (scores["trajectory_id"] == target_id) & (scores["song_name"] == target_song_name)
+    if is_cross_song:
+        target_scores["selected_for_training"] = False
+        target_scores["selected_as_target"] = target_scores["trajectory_id"] == target_id
 
     out_dir = ensure_dir(output_root(config) / "data" / experiment_name(config))
     save_csv(out_dir / "trajectory_scores.csv", scores)
+    if is_cross_song:
+        save_csv(out_dir / "target_trajectory_scores.csv", target_scores)
     selection = {
-        "song_name": song_name,
+        "song_name": source_song_name,
+        "source_song_name": source_song_name,
+        "target_song_name": target_song_name,
+        "is_cross_song": is_cross_song,
         "rp1m_root": config["rp1m_root"],
         "experiment_name": experiment_name(config),
-        "selection_meta": selection_meta,
+        "selection_meta": source_selection_meta,
+        "source_selection_meta": source_selection_meta,
+        "target_selection_meta": target_selection_meta,
         "selection_notes": selection_notes,
         "top_k_train_requested": top_k,
         "num_training_trajectories": len(train_ids),
@@ -113,7 +148,13 @@ def main() -> None:
     }
     save_json(out_dir / "selection.json", selection)
     save_json(out_dir / "train_trajectory_ids.json", train_ids)
-    save_json(out_dir / "reconstruction_target.json", {"song_name": song_name, "trajectory_id": target_id, "rank": reconstruction_rank})
+    save_json(out_dir / "reconstruction_target.json", {
+        "song_name": target_song_name,
+        "source_song_name": source_song_name,
+        "target_song_name": target_song_name,
+        "trajectory_id": target_id,
+        "rank": reconstruction_rank,
+    })
     print(f"Training trajectories: {len(train_ids)}")
     print(f"Target trajectory: {target_id} (rank {reconstruction_rank})")
     print(f"Saved selection outputs: {out_dir}")
