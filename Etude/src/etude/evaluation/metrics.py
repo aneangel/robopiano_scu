@@ -10,6 +10,7 @@ def joint_metrics(q: np.ndarray, q_ref: np.ndarray, qdot: np.ndarray | None = No
         "tracking/joint_mse": float(np.mean((q - q_ref) ** 2)),
         "tracking/joint_mae": float(np.mean(np.abs(q - q_ref))),
     }
+    metrics["tracking/joint_pos_rmse"] = float(np.sqrt(metrics["tracking/joint_mse"]))
     if qdot is not None and qdot_ref is not None:
         metrics["tracking/qvel_mse"] = float(
             np.mean((np.asarray(qdot, dtype=np.float32) - np.asarray(qdot_ref, dtype=np.float32)) ** 2)
@@ -59,3 +60,56 @@ def note_metrics(predicted_keys: np.ndarray, target_keys: np.ndarray) -> dict[st
         "piano/missed_notes": fn,
         "piano/extra_notes": fp,
     }
+
+
+def align_reference(reference: np.ndarray, reference_indices: np.ndarray | None) -> np.ndarray:
+    array = np.asarray(reference)
+    if reference_indices is None:
+        return array
+    if array.ndim == 0:
+        return array
+    indices = np.asarray(reference_indices, dtype=np.int64).reshape(-1)
+    if indices.size == 0 or array.shape[0] == 0:
+        shape = (0, *array.shape[1:])
+        return np.zeros(shape, dtype=array.dtype)
+    clipped = np.clip(indices, 0, array.shape[0] - 1)
+    return array[clipped]
+
+
+def error_profile_metrics(
+    current: np.ndarray,
+    target: np.ndarray,
+    *,
+    prefix: str,
+    dt: float,
+) -> dict[str, float]:
+    current_array = np.asarray(current, dtype=np.float32)
+    target_array = np.asarray(target, dtype=np.float32)
+    if current_array.shape != target_array.shape:
+        raise ValueError(f"current and target must match, got {current_array.shape} and {target_array.shape}")
+    if current_array.ndim == 0 or current_array.shape[0] == 0:
+        return {}
+
+    per_step = np.sqrt(np.mean((current_array - target_array).reshape(current_array.shape[0], -1) ** 2, axis=1))
+    metrics = {
+        f"{prefix}_error_initial": float(per_step[0]),
+        f"{prefix}_error_final": float(per_step[-1]),
+        f"{prefix}_error_p95": float(np.percentile(per_step, 95)),
+        f"{prefix}_error_auc": float(np.mean(per_step)),
+        f"{prefix}_error_drift": float(per_step[-1] - per_step[0]),
+    }
+    metrics[f"{prefix}_error_slope_per_s"] = _error_slope(per_step, dt)
+    return metrics
+
+
+def _error_slope(per_step: np.ndarray, dt: float) -> float:
+    dt = float(dt)
+    if per_step.size <= 1 or dt <= 0.0:
+        return 0.0
+    timeline = np.arange(per_step.size, dtype=np.float32) * dt
+    centered_t = timeline - float(np.mean(timeline))
+    centered_e = per_step - float(np.mean(per_step))
+    denom = float(np.dot(centered_t, centered_t))
+    if denom <= 0.0:
+        return 0.0
+    return float(np.dot(centered_t, centered_e) / denom)

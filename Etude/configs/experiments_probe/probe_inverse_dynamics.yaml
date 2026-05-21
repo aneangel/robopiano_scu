@@ -1,0 +1,71 @@
+experiment:
+  name: probe_inverse_dynamics
+  controller_family: inverse_dynamics
+  evaluation_mode: train_supervised
+  resource_tier: gpu_probe
+
+output:
+  root: /WAVE/datasets/ccoelho_lab-jlanders/etude/20260519_tracking_dataset_4a884b7_r2/runs_probe
+  subdir: probe_inverse_dynamics
+
+execution:
+  kind: train_supervised
+  allow_execute: true
+  requires_dataset: true
+  requires_gpu: true
+  requires_rollout: false
+
+data:
+  dataset_root: /WAVE/datasets/ccoelho_lab-jlanders/etude/20260519_tracking_dataset_4a884b7_r2/views/train_probe_24
+  batch_size: 256
+  sequence_length: 16
+  num_workers: 2
+  normalize: false
+
+features:
+  tracking:
+    lookahead_steps: [1, 5, 10]
+    include_target_keys: true
+    include_fingertips: false
+
+inverse_dynamics:
+  desired_state_horizon: 1
+  future_steps: [1, 2, 5, 10]
+  include_future_deltas: true
+  condition_on_keys: true
+  condition_on_fingertips: false
+  condition_on_previous_action: true
+  zero_fill_missing: true
+
+trajectory:
+  dt: 0.005
+  reference_dim: 46
+  lookahead_steps: [1, 5, 10]
+  control_rate_hz: 200
+
+controller:
+  type: inverse_dynamics
+  residual_model: mlp
+  model_type: mlp
+  output_mode: full_action
+  hidden_dim: 256
+  num_layers: 3
+  dropout: 0.05
+  activation: gelu
+
+pd:
+  enabled: true
+  kp_init: 12.0
+  kd_init: 0.6
+  action_clip: true
+
+training:
+  epochs: 12
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  gradient_clip_norm: 1.0
+  device: cuda
+  mixed_precision: false
+
+wandb:
+  enabled: false

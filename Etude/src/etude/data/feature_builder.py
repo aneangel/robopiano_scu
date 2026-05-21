@@ -45,8 +45,12 @@ def build_tracking_features(
         target_matrix = _matrix(target_keys, name="target_keys")
         pieces.append(target_matrix[_bounded_index(index, target_matrix.shape[0])])
     if spec.include_fingertips and fingertips is not None:
-        fingertip_matrix = _matrix(fingertips, name="fingertips")
-        pieces.append(fingertip_matrix[_bounded_index(index, fingertip_matrix.shape[0])])
+        fingertip_array = np.asarray(fingertips, dtype=np.float32)
+        if fingertip_array.ndim == 1:
+            pieces.append(fingertip_array)
+        else:
+            fingertip_matrix = _matrix(fingertips, name="fingertips")
+            pieces.append(fingertip_matrix[_bounded_index(index, fingertip_matrix.shape[0])])
     return _concat_float32(pieces)
 
 

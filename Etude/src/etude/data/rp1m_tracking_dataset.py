@@ -31,6 +31,8 @@ class RP1MTrackingDataset(Dataset):
         feature_spec: FeatureSpec | None = None,
         feature_mode: str = "tracking",
         feature_config: dict[str, Any] | None = None,
+        split: str | None = None,
+        splits_file: str | Path | None = None,
     ) -> None:
         self.dataset_root = Path(dataset_root)
         self.sequence_length = int(sequence_length)
@@ -43,6 +45,33 @@ class RP1MTrackingDataset(Dataset):
         if not manifest_path.exists():
             raise FileNotFoundError(manifest_path)
         self.manifest = pd.read_csv(manifest_path)
+        if split is not None:
+            split_path = Path(splits_file) if splits_file is not None else self.dataset_root / "splits.csv"
+            if not split_path.exists():
+                raise FileNotFoundError(
+                    f"Requested split={split!r}, but split file does not exist: {split_path}"
+                )
+            splits = pd.read_csv(split_path)
+            if "split" not in splits.columns:
+                raise ValueError(f"Split file must contain a 'split' column: {split_path}")
+            if "episode_id" in self.manifest.columns and "episode_id" in splits.columns:
+                split_rows = splits[splits["split"].astype(str) == str(split)]
+                keep = set(split_rows["episode_id"].astype(str))
+                self.manifest = self.manifest[
+                    self.manifest["episode_id"].astype(str).isin(keep)
+                ].reset_index(drop=True)
+            elif "path" in splits.columns:
+                split_rows = splits[splits["split"].astype(str) == str(split)]
+                keep = set(split_rows["path"].astype(str))
+                self.manifest = self.manifest[
+                    self.manifest["path"].astype(str).isin(keep)
+                ].reset_index(drop=True)
+            else:
+                raise ValueError(
+                    f"Split file must contain episode_id or path for filtering: {split_path}"
+                )
+            if self.manifest.empty:
+                raise ValueError(f"Requested split={split!r} is empty in {split_path}")
         self._episodes: list[dict[str, np.ndarray]] = []
         self._index: list[tuple[int, int]] = []
         for episode_idx, row in self.manifest.iterrows():

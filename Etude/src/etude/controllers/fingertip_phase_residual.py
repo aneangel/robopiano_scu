@@ -76,7 +76,7 @@ class FingertipPhaseResidualController(TrajectoryFollower):
             metadata=self.metadata,
             plan_bundle=self.metadata.get("plan_bundle"),
             target_keys=obs.get("target_keys"),
-            current_fingertips=obs.get("fingertips"),
+            current_fingertips=_coerce_fingertip_matrix(obs.get("fingertips")),
             desired_fingertips=_reference_timestep(self.metadata.get("desired_fingertips"), t),
             fingertip_weights=_reference_timestep(self.metadata.get("fingertip_weights"), t),
             active_finger_mask=_reference_timestep(self.metadata.get("active_finger_mask"), t),
@@ -95,7 +95,7 @@ class FingertipPhaseResidualController(TrajectoryFollower):
             "phase/scalar": float(phase_state["scalar"]),
             "residual/gain": float(self._phase_gate_value(phase_state)),
             "tracking/fingertip_error_l2": _fingertip_error_l2(
-                obs.get("fingertips"),
+                _coerce_fingertip_matrix(obs.get("fingertips")),
                 _reference_timestep(self.metadata.get("desired_fingertips"), t),
             ),
         }
@@ -138,6 +138,15 @@ def _reference_timestep(value: Any, t: int) -> np.ndarray | None:
         return array.astype(np.float32)
     index = int(np.clip(t, 0, array.shape[0] - 1))
     return array[index].astype(np.float32)
+
+
+def _coerce_fingertip_matrix(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    if array.ndim == 1 and array.size % 3 == 0:
+        return array.reshape(array.size // 3, 3).astype(np.float32)
+    return array.astype(np.float32)
 
 
 def _fingertip_error_l2(current: np.ndarray | None, desired: np.ndarray | None) -> float:

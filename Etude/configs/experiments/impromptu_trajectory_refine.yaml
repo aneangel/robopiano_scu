@@ -1,0 +1,66 @@
+includes:
+  - ../controller/fingertip_phase_residual.yaml
+  - ../corruption/none.yaml
+  - ../features/fingertip_phase.yaml
+
+experiment:
+  name: impromptu_trajectory_refine
+  evaluation_mode: rollout_refine
+  resource_tier: tier2_gpu_train
+
+training:
+  epochs: 10
+  lr: 1.0e-5
+  weight_decay: 1.0e-5
+  device: cuda
+  eval_every: 1
+  max_rollout_steps: null
+  gradient_clip_norm: 1.0
+  batch_size: 64
+  residual_l2_weight: 0.05
+
+rollout:
+  backend: dm_control
+  task: RoboPianist-debug-TwinkleTwinkleLittleStar-v0
+  max_steps: 1870
+  render_video: false
+
+refinement:
+  stage: impromptu_playback
+  warm_start: true
+  preserve_base_checkpoint: true
+  selection_metric: piano/event_f1
+  selection_mode: max
+  fallback_selection_metric: tracking/joint_pos_rmse
+  heuristic_gain: 0.35
+  error_scale_cm: 2.0
+  tie_break_metrics:
+    - piano/missed_events
+    - piano/false_events
+    - piano/timing_abs_error_mean_s
+    - fingertip/active_l2_mean
+    - action/l2_mean
+    - action/smoothness_mean
+    - control/residual_l2
+
+reward:
+  target_key_activation: 2.0
+  missed_key: -4.0
+  wrong_key: -6.0
+  timing_error: -2.0
+  release_error: -1.0
+  fingertip_tracking: -0.5
+  joint_tracking: -0.5
+  action_smoothness: -0.05
+  residual_l2: -0.05
+
+execution:
+  kind: impromptu_trajectory_refine
+  dry_run_support: true
+  allow_execute: true
+  requires_rollout: true
+  requires_gpu: true
+
+output:
+  root: /WAVE/datasets/ccoelho_lab-jlanders/etude
+  subdir: 20260520_impromptu_refine_all_controllers

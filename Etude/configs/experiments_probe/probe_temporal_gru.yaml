@@ -1,0 +1,66 @@
+experiment:
+  name: probe_temporal_gru
+  controller_family: temporal_residual
+  evaluation_mode: train_supervised
+  resource_tier: gpu_probe
+
+output:
+  root: /WAVE/datasets/ccoelho_lab-jlanders/etude/20260519_tracking_dataset_4a884b7_r2/runs_probe
+  subdir: probe_temporal_gru
+
+execution:
+  kind: train_supervised
+  allow_execute: true
+  requires_dataset: true
+  requires_gpu: true
+  requires_rollout: false
+
+data:
+  dataset_root: /WAVE/datasets/ccoelho_lab-jlanders/etude/20260519_tracking_dataset_4a884b7_r2/views/train_probe_24
+  batch_size: 128
+  sequence_length: 32
+  num_workers: 2
+  normalize: false
+
+features:
+  tracking:
+    lookahead_steps: [1, 5, 10]
+    include_target_keys: true
+    include_fingertips: false
+
+trajectory:
+  dt: 0.005
+  reference_dim: 46
+  lookahead_steps: [1, 5, 10]
+  control_rate_hz: 200
+
+controller:
+  type: temporal_residual
+  residual_model: gru
+  hidden_dim: 128
+  num_layers: 1
+  encoder_dim: 128
+  dropout: 0.0
+
+pd:
+  enabled: true
+  kp_init: 12.0
+  kd_init: 0.6
+  action_clip: true
+
+temporal:
+  history_steps: 16
+  include_previous_residual: true
+  reset_hidden_on_episode: true
+  lookahead_steps: [1, 5, 10]
+
+training:
+  epochs: 15
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  gradient_clip_norm: 1.0
+  device: cuda
+  mixed_precision: false
+
+wandb:
+  enabled: false

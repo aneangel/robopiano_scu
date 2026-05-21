@@ -11,9 +11,8 @@ import yaml
 from etude.data.trajectory_io import load_qpos_trajectory
 from etude.evaluation.event_metrics import EventMetricsConfig, compute_event_metrics
 from etude.evaluation.fingertip_metrics import compute_fingertip_assignment_metrics
-from etude.evaluation.metrics import action_metrics, joint_metrics, note_metrics
+from etude.evaluation.metrics import action_metrics, align_reference, error_profile_metrics, joint_metrics, note_metrics
 from etude.evaluation.tracker_eval_utils import build_tracker_controller
-from etude.features.fingertip_phase_blocks import FingertipFeatureSpec, PhaseFeatureSpec
 from etude.robopianist.env_factory import make_robopianist_env
 from etude.robopianist.state_mapping import resolve_mapping_from_env
 
@@ -53,15 +52,27 @@ def main() -> None:
         traj["qdot_ref"],
         metadata=traj.get("metadata"),
     )
+    reference_indices = rollout.get("reference_indices")
+    aligned_q_ref = align_reference(traj["q_ref"], reference_indices)
+    aligned_qdot_ref = align_reference(traj["qdot_ref"], reference_indices)
     metrics = joint_metrics(
         rollout["q"],
-        traj["q_ref"][: rollout["q"].shape[0]],
+        aligned_q_ref,
         rollout["qdot"],
-        traj["qdot_ref"][: rollout["qdot"].shape[0]],
+        aligned_qdot_ref,
+    )
+    metrics.update(
+        error_profile_metrics(
+            rollout["q"],
+            aligned_q_ref,
+            prefix="tracking/joint",
+            dt=float(np.asarray(rollout.get("env_dt", traj.get("dt", 0.005))).item()),
+        )
     )
     metrics.update(action_metrics(rollout["actions"], getattr(mapping, "action_low", None), getattr(mapping, "action_high", None)))
     metrics.update(_fingertip_metrics(rollout, traj))
     metrics.update(_piano_metrics(rollout, traj))
+    metrics.update(_timing_metrics(rollout))
 
     diagnostics = getattr(controller, "diagnostics", None)
     if callable(diagnostics):
@@ -80,7 +91,7 @@ def _piano_metrics(rollout: dict[str, np.ndarray], traj: dict[str, Any]) -> dict
     if predicted is None or target is None:
         return {}
     predicted_keys = np.asarray(predicted, dtype=np.float32)
-    target_keys = np.asarray(target, dtype=np.float32)
+    target_keys = align_reference(np.asarray(target, dtype=np.float32), rollout.get("reference_indices"))
     steps = min(predicted_keys.shape[0], target_keys.shape[0])
     if steps == 0:
         return {}
@@ -100,15 +111,46 @@ def _piano_metrics(rollout: dict[str, np.ndarray], traj: dict[str, Any]) -> dict
 def _fingertip_metrics(rollout: dict[str, np.ndarray], traj: dict[str, Any]) -> dict[str, float]:
     current = rollout.get("fingertips")
     desired = rollout.get("desired_fingertips")
+    active_finger_mask = rollout.get("active_finger_mask")
     if current is None or desired is None:
-        desired = traj.get("metadata", {}).get("desired_fingertips")
+        desired = align_reference(traj.get("metadata", {}).get("desired_fingertips"), rollout.get("reference_indices"))
+    if active_finger_mask is None:
+        active_finger_mask = align_reference(
+            traj.get("metadata", {}).get("active_finger_mask"),
+            rollout.get("reference_indices"),
+        )
     if current is None or desired is None:
         return {}
-    return compute_fingertip_assignment_metrics(
+    metrics = compute_fingertip_assignment_metrics(
         current,
         desired,
-        active_finger_mask=rollout.get("active_finger_mask", traj.get("metadata", {}).get("active_finger_mask")),
+        active_finger_mask=active_finger_mask,
     )
+    metrics.update(
+        error_profile_metrics(
+            np.asarray(current, dtype=np.float32),
+            np.asarray(desired, dtype=np.float32),
+            prefix="tracking/fingertip",
+            dt=float(np.asarray(rollout.get("env_dt", traj.get("dt", 0.005))).item()),
+        )
+    )
+    return metrics
+
+
+def _timing_metrics(rollout: dict[str, np.ndarray]) -> dict[str, float]:
+    trajectory_dt = float(np.asarray(rollout.get("trajectory_dt", 0.0)).item())
+    env_dt = float(np.asarray(rollout.get("env_dt", 0.0)).item())
+    metrics = {
+        "timing/reference_dt_s": trajectory_dt,
+        "timing/env_dt_s": env_dt,
+    }
+    if env_dt > 0.0:
+        metrics["timing/controller_rate_hz"] = 1.0 / env_dt
+    if trajectory_dt > 0.0:
+        metrics["timing/reference_rate_hz"] = 1.0 / trajectory_dt
+    if env_dt > 0.0 and trajectory_dt > 0.0:
+        metrics["timing/reference_repeat_factor"] = max(trajectory_dt / env_dt, 1.0)
+    return metrics
 
 
 if __name__ == "__main__":

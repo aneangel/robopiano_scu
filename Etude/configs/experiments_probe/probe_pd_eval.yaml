@@ -1,0 +1,37 @@
+experiment:
+  name: probe_pd_eval
+  controller_family: pd
+  evaluation_mode: rollout_eval
+  resource_tier: gpu_probe
+
+output:
+  root: /WAVE/datasets/ccoelho_lab-jlanders/etude/20260519_tracking_dataset_4a884b7_r2/eval_probe
+  subdir: probe_pd_eval
+
+execution:
+  kind: rollout_eval
+  allow_execute: false
+  requires_dataset: false
+  requires_gpu: false
+  requires_rollout: true
+
+trajectory:
+  dt: 0.005
+  reference_dim: 46
+  lookahead_steps: [1]
+  control_rate_hz: 200
+
+controller:
+  type: pd
+
+pd:
+  enabled: true
+  kp_init: 12.0
+  kd_init: 0.6
+  action_clip: true
+
+training:
+  device: cpu
+
+wandb:
+  enabled: false

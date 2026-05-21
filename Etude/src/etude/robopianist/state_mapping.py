@@ -51,10 +51,23 @@ class StateMapping:
         return int(self.action_low.size)
 
     def extract_q(self, source: Any) -> np.ndarray:
-        return self._extract_vector(source, ("q", "qpos", "position"), self.qpos_indices_46)
+        return self._extract_vector(
+            source,
+            ("q", "qpos", "position", "joints_pos"),
+            self.qpos_indices_46,
+            allow_shadow_hand_pair=True,
+        )
 
     def extract_qdot(self, source: Any) -> np.ndarray:
-        return self._extract_vector(source, ("qdot", "qvel", "velocity"), self.qvel_indices_46)
+        try:
+            return self._extract_vector(
+                source,
+                ("qdot", "qvel", "velocity", "joints_vel"),
+                self.qvel_indices_46,
+                allow_shadow_hand_pair=True,
+            )
+        except KeyError:
+            return np.zeros(len(self.qvel_indices_46), dtype=np.float32)
 
     def extract_fingertips(self, source: Any) -> np.ndarray | None:
         if self.fingertip_indices is None:
@@ -64,7 +77,7 @@ class StateMapping:
     def extract_key_state(self, source: Any) -> np.ndarray | None:
         if self.key_state_indices is None:
             return None
-        return self._extract_vector(source, ("key_state", "keys", "piano_keys"), self.key_state_indices)
+        return self._extract_vector(source, ("key_state", "keys", "piano_keys", "piano/state"), self.key_state_indices)
 
     def action_from_joint_command(self, command_46: np.ndarray) -> np.ndarray:
         command_46 = np.asarray(command_46, dtype=np.float32).reshape(-1)
@@ -120,8 +133,16 @@ class StateMapping:
         return cls.from_json_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
     @staticmethod
-    def _extract_vector(source: Any, names: tuple[str, ...], indices: list[int]) -> np.ndarray:
+    def _extract_vector(
+        source: Any,
+        names: tuple[str, ...],
+        indices: list[int],
+        *,
+        allow_shadow_hand_pair: bool = False,
+    ) -> np.ndarray:
         data = _find_array(source, names)
+        if data is None and allow_shadow_hand_pair:
+            data = _find_shadow_hand_pair(source, names)
         if data is None:
             raise KeyError(f"Could not find any of {names} in observation/state source")
         flat = np.asarray(data, dtype=np.float32).reshape(-1)
@@ -147,6 +168,23 @@ def _find_array(source: Any, names: tuple[str, ...]) -> Any:
     if hasattr(source, "observation"):
         return _find_array(source.observation, names)
     return None
+
+
+def _find_shadow_hand_pair(source: Any, names: tuple[str, ...]) -> np.ndarray | None:
+    if not isinstance(source, dict):
+        return None
+    right = None
+    left = None
+    for suffix in names:
+        right = source.get(f"rh_shadow_hand/{suffix}")
+        left = source.get(f"lh_shadow_hand/{suffix}")
+        if right is not None and left is not None:
+            break
+    if right is None or left is None:
+        return None
+    return np.concatenate(
+        [np.asarray(right, dtype=np.float32).reshape(-1), np.asarray(left, dtype=np.float32).reshape(-1)]
+    )
 
 
 def resolve_mapping_from_env(env: Any, **kwargs: Any) -> StateMapping:

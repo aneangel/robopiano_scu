@@ -44,6 +44,7 @@ class KeyAwareResidualController(TrajectoryFollower):
         paths = feature_block_paths or ["etude.features.key_blocks:build_key_features"]
         self.feature_blocks = [(path, _resolve_feature_block(path)) for path in paths]
         self._safety_fn = _resolve_residual_safety()
+        self.expected_input_dim = _infer_first_linear_input_dim(self.residual_model)
 
     def reset(
         self,
@@ -112,7 +113,15 @@ class KeyAwareResidualController(TrajectoryFollower):
                 **kwargs,
             )
             block_values.append(np.asarray(value, dtype=np.float32).reshape(-1))
-        return np.concatenate(base + block_values).astype(np.float32)
+        block_only = (
+            np.concatenate(block_values).astype(np.float32)
+            if block_values
+            else np.zeros(0, dtype=np.float32)
+        )
+        combined = np.concatenate(base + block_values).astype(np.float32)
+        if self.expected_input_dim == block_only.size:
+            return block_only
+        return combined
 
     def _run_model(self, features: np.ndarray) -> tuple[Any, np.ndarray | None]:
         with torch.no_grad():
@@ -184,6 +193,13 @@ def _resolve_residual_safety() -> Callable[..., np.ndarray] | None:
         fn = getattr(module, name, None)
         if callable(fn):
             return fn
+    return None
+
+
+def _infer_first_linear_input_dim(model: torch.nn.Module) -> int | None:
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            return int(module.in_features)
     return None
 
 

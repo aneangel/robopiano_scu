@@ -13,7 +13,7 @@ from etude.controllers.pd import PDController
 from etude.controllers.pd_scheduled import ScheduledPDController
 from etude.controllers.residual_safety import PhaseGatingConfig, ResidualSafetyConfig
 from etude.data.feature_builder import FeatureSpec
-from etude.features.fingertip_phase_blocks import FingertipFeatureSpec, PhaseFeatureSpec
+from etude.features.fingertip_phase_blocks import DEFAULT_PHASE_NAMES, FingertipFeatureSpec, PhaseFeatureSpec
 from etude.features.inverse_dynamics_blocks import InverseDynamicsFeatureSpec
 from etude.utils.import_utils import load_symbol
 
@@ -40,6 +40,7 @@ def build_tracker_controller(mapping: Any, config: dict[str, Any], *, checkpoint
     model = instantiate_model(controller_cfg, checkpoint, device=device)
 
     if family == "pd_residual":
+        controller_type = str(controller_cfg.get("type") or controller_cfg.get("family") or family)
         kwargs: dict[str, Any] = {
             "mapping": mapping,
             "residual_model": model,
@@ -47,9 +48,9 @@ def build_tracker_controller(mapping: Any, config: dict[str, Any], *, checkpoint
             "feature_spec": build_tracking_feature_spec(config),
             "device": device,
         }
-        if "safe" in str(controller_cfg.get("type", "")).lower() or "safe" in str(controller_cfg.get("family", "")).lower():
+        if "safe" in controller_type.lower():
             kwargs["safety"] = build_residual_safety(config)
-        return build_controller(family, **kwargs)
+        return build_controller(controller_type, **kwargs)
 
     if family == "key_aware_residual":
         return build_controller(
@@ -58,15 +59,17 @@ def build_tracker_controller(mapping: Any, config: dict[str, Any], *, checkpoint
             residual_model=model,
             pd=pd_controller,
             feature_block_paths=list(controller_cfg.get("feature_block_paths", [])) or None,
-            feature_block_kwargs=_as_dict(controller_cfg.get("feature_block_kwargs")),
+            feature_block_kwargs=_feature_block_kwargs(config, controller_cfg),
             device=device,
             residual_scale=float(controller_cfg.get("residual_scale", 1.0)),
             residual_clip=float(controller_cfg.get("residual_clip", 1.0)),
         )
 
     if family == "fingertip_residual":
-        fingertip_cfg = _as_dict(controller_cfg.get("fingertip_control"))
-        phase_cfg = _as_dict(controller_cfg.get("phase"))
+        fingertip_cfg = _as_dict(config.get("fingertip_control"))
+        fingertip_cfg.update(_as_dict(controller_cfg.get("fingertip_control")))
+        phase_cfg = _as_dict(config.get("phase"))
+        phase_cfg.update(_as_dict(controller_cfg.get("phase")))
         return build_controller(
             family,
             mapping,
@@ -86,6 +89,7 @@ def build_tracker_controller(mapping: Any, config: dict[str, Any], *, checkpoint
                 encode_as=str(phase_cfg.get("encode_as", "both")),
                 include_mask=bool(phase_cfg.get("include_mask", True)),
                 allow_missing=bool(phase_cfg.get("allow_missing", True)),
+                phase_names=tuple(phase_cfg.get("phase_names", DEFAULT_PHASE_NAMES)),
             ),
             phase_gain=float(controller_cfg.get("phase_gain", 1.0)),
             device=device,
@@ -163,14 +167,17 @@ def build_tracker_controller_from_checkpoint_payload(mapping: Any, checkpoint: d
 
     model = instantiate_model(controller_cfg, checkpoint, device=device)
     if family == "pd_residual":
-        return build_controller(
-            family,
-            mapping=mapping,
-            residual_model=model,
-            pd=pd_controller,
-            feature_spec=build_tracking_feature_spec(config),
-            device=device,
-        )
+        controller_type = str(controller_cfg.get("type") or controller_cfg.get("family") or family)
+        kwargs: dict[str, Any] = {
+            "mapping": mapping,
+            "residual_model": model,
+            "pd": pd_controller,
+            "feature_spec": build_tracking_feature_spec(config),
+            "device": device,
+        }
+        if "safe" in controller_type.lower():
+            kwargs["safety"] = build_residual_safety(config)
+        return build_controller(controller_type, **kwargs)
     if family == "key_aware_residual":
         return build_controller(
             family,
@@ -178,7 +185,7 @@ def build_tracker_controller_from_checkpoint_payload(mapping: Any, checkpoint: d
             residual_model=model,
             pd=pd_controller,
             feature_block_paths=list(controller_cfg.get("feature_block_paths", [])) or None,
-            feature_block_kwargs=_as_dict(controller_cfg.get("feature_block_kwargs")),
+            feature_block_kwargs=_feature_block_kwargs(config, controller_cfg),
             device=device,
             residual_scale=float(controller_cfg.get("residual_scale", 1.0)),
             residual_clip=float(controller_cfg.get("residual_clip", 1.0)),
@@ -275,7 +282,8 @@ def build_tracking_feature_spec(config: dict[str, Any]) -> FeatureSpec:
 
 def build_fingertip_feature_spec(config: dict[str, Any]) -> FingertipFeatureSpec:
     controller_cfg = _as_dict(config.get("controller"))
-    fingertip_cfg = _as_dict(controller_cfg.get("fingertip_control"))
+    fingertip_cfg = _as_dict(config.get("fingertip_control"))
+    fingertip_cfg.update(_as_dict(controller_cfg.get("fingertip_control")))
     return FingertipFeatureSpec(
         include_current=bool(fingertip_cfg.get("enabled", True)),
         include_desired=bool(fingertip_cfg.get("enabled", True)),
@@ -289,12 +297,14 @@ def build_fingertip_feature_spec(config: dict[str, Any]) -> FingertipFeatureSpec
 
 def build_phase_feature_spec(config: dict[str, Any]) -> PhaseFeatureSpec:
     controller_cfg = _as_dict(config.get("controller"))
-    phase_cfg = _as_dict(controller_cfg.get("phase"))
+    phase_cfg = _as_dict(config.get("phase"))
+    phase_cfg.update(_as_dict(controller_cfg.get("phase")))
     return PhaseFeatureSpec(
         source=str(phase_cfg.get("source", "metadata")),
         encode_as=str(phase_cfg.get("encode_as", "both")),
         include_mask=bool(phase_cfg.get("include_mask", True)),
         allow_missing=bool(phase_cfg.get("allow_missing", True)),
+        phase_names=tuple(phase_cfg.get("phase_names", DEFAULT_PHASE_NAMES)),
     )
 
 
@@ -315,6 +325,13 @@ def build_residual_safety(config: dict[str, Any]) -> ResidualSafetyConfig:
             release=float(phase_cfg.get("release", 1.0)),
         ),
     )
+
+
+def _feature_block_kwargs(config: dict[str, Any], controller_cfg: dict[str, Any]) -> dict[str, Any]:
+    kwargs = dict(_as_dict(controller_cfg.get("feature_block_kwargs")))
+    feature_cfg = _as_dict(config.get("features"))
+    kwargs.update(_as_dict(feature_cfg.get("block_kwargs")))
+    return kwargs
 
 
 def instantiate_model(controller_cfg: dict[str, Any], checkpoint: dict[str, Any], *, device: str) -> torch.nn.Module:

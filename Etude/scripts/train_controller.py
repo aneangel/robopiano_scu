@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import inspect
+import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +15,7 @@ from etude.experiments import load_experiment_config
 from etude.controllers.factory import normalize_controller_family
 from etude.data.feature_builder import FeatureSpec
 from etude.data.rp1m_tracking_dataset import RP1MTrackingDataset
-from etude.training.bc_trainer import train_bc_epoch
+from etude.training.bc_trainer import eval_bc_epoch, train_bc_epoch
 from etude.utils.import_utils import load_symbol
 from etude.utils.seed import seed_everything
 
@@ -30,12 +33,29 @@ def main() -> None:
     config = load_experiment_config(Path(args.config))
     seed_everything(int(config.get("seed", 7)))
 
+    dataset_root = Path(config["data"]["dataset_root"])
+    splits_file = dataset_root / "splits.csv"
+    has_splits = splits_file.exists()
+    if has_splits:
+        print(f"Using dataset splits from {splits_file}")
+        train_split = "train"
+        val_split = "val"
+    else:
+        print(
+            f"WARNING: no splits.csv found at {splits_file}; training on the full manifest "
+            "and selecting best.pt by train loss for backward compatibility."
+        )
+        train_split = None
+        val_split = None
+
     dataset = RP1MTrackingDataset(
         config["data"]["dataset_root"],
         sequence_length=int(config["data"].get("sequence_length", 1)),
         feature_spec=_build_tracking_feature_spec(config),
         feature_mode=_feature_mode(config),
         feature_config=_feature_config(config),
+        split=train_split,
+        splits_file=splits_file if has_splits else None,
     )
     loader = DataLoader(
         dataset,
@@ -43,6 +63,23 @@ def main() -> None:
         shuffle=True,
         num_workers=int(config["data"].get("num_workers", 0)),
     )
+    val_loader = None
+    if val_split is not None:
+        val_dataset = RP1MTrackingDataset(
+            config["data"]["dataset_root"],
+            sequence_length=int(config["data"].get("sequence_length", 1)),
+            feature_spec=_build_tracking_feature_spec(config),
+            feature_mode=_feature_mode(config),
+            feature_config=_feature_config(config),
+            split=val_split,
+            splits_file=splits_file,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=int(config["data"].get("batch_size", 256)),
+            shuffle=False,
+            num_workers=int(config["data"].get("num_workers", 0)),
+        )
 
     sample = dataset[0]
     input_dim = int(sample["features"].shape[-1])
@@ -62,21 +99,101 @@ def main() -> None:
     output_root = Path(args.output_root)
     checkpoint_dir = output_root / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_loss = float("inf")
+    best_train_loss = float("inf")
+    best_val_loss = float("inf")
+    history: list[dict[str, Any]] = []
     for epoch in range(1, int(config["training"].get("epochs", 30)) + 1):
         result = train_bc_epoch(model, loader, optimizer, device)
-        print(f"epoch={epoch} train_loss={result.train_loss:.6f}")
-        if result.train_loss < best_loss:
-            best_loss = result.train_loss
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "config": config,
-                    "input_dim": input_dim,
-                    "action_dim": action_dim,
-                },
-                checkpoint_dir / "best.pt",
+        val_loss = None
+        if val_loader is not None:
+            val_result = eval_bc_epoch(model, val_loader, device)
+            val_loss = val_result.eval_loss
+            print(f"epoch={epoch} train_loss={result.train_loss:.6f} val_loss={val_loss:.6f}")
+        else:
+            print(f"epoch={epoch} train_loss={result.train_loss:.6f}")
+
+        metadata = {
+            "epoch": epoch,
+            "train_loss": result.train_loss,
+            "val_loss": val_loss,
+            "selection_metric": "val_loss" if val_loss is not None else "train_loss",
+            "selection_mode": "min",
+        }
+        _save_checkpoint(
+            checkpoint_dir / "last.pt",
+            model=model,
+            config=config,
+            input_dim=input_dim,
+            action_dim=action_dim,
+            metadata=metadata,
+        )
+        if result.train_loss < best_train_loss:
+            best_train_loss = result.train_loss
+            _save_checkpoint(
+                checkpoint_dir / "best_train.pt",
+                model=model,
+                config=config,
+                input_dim=input_dim,
+                action_dim=action_dim,
+                metadata={**metadata, "selection_metric": "train_loss"},
             )
+        if val_loss is not None and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            _save_checkpoint(
+                checkpoint_dir / "best_val.pt",
+                model=model,
+                config=config,
+                input_dim=input_dim,
+                action_dim=action_dim,
+                metadata={**metadata, "selection_metric": "val_loss"},
+            )
+        best_alias_source = checkpoint_dir / ("best_val.pt" if val_loader is not None else "best_train.pt")
+        if best_alias_source.exists():
+            shutil.copy2(best_alias_source, checkpoint_dir / "best.pt")
+        history.append({"epoch": epoch, "train_loss": result.train_loss, "val_loss": val_loss})
+
+    _write_history(output_root / "training_history.csv", history)
+    summary = {
+        "best_train_loss": best_train_loss,
+        "best_val_loss": best_val_loss if val_loader is not None else None,
+        "best_checkpoint": str(checkpoint_dir / ("best_val.pt" if val_loader is not None else "best_train.pt")),
+        "best_alias": str(checkpoint_dir / "best.pt"),
+        "split_file": str(splits_file) if has_splits else None,
+        "selection_note": "Supervised best checkpoints are preselection only; final selection should use rollout evaluation.",
+    }
+    (output_root / "training_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+
+
+def _save_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    config: dict[str, Any],
+    input_dim: int,
+    action_dim: int,
+    metadata: dict[str, Any],
+) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "config": config,
+            "input_dim": input_dim,
+            "action_dim": action_dim,
+            **metadata,
+        },
+        path,
+    )
+
+
+def _write_history(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["epoch", "train_loss", "val_loss"])
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _build_model(config: dict[str, Any], *, input_dim: int, action_dim: int) -> torch.nn.Module:

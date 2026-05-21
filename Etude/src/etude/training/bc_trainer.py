@@ -13,6 +13,11 @@ class TrainResult:
     train_loss: float
 
 
+@dataclass
+class EvalResult:
+    eval_loss: float
+
+
 def train_bc_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -34,6 +39,26 @@ def train_bc_epoch(
         total += float(loss.detach().cpu()) * features.shape[0]
         count += features.shape[0]
     return TrainResult(train_loss=total / max(count, 1))
+
+
+def eval_bc_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str | torch.device = "cpu",
+) -> EvalResult:
+    model.eval()
+    device = torch.device(device)
+    total = 0.0
+    count = 0
+    with torch.no_grad():
+        for batch in loader:
+            features = batch["features"].to(device).float()
+            actions = batch["actions"].to(device).float()
+            pred = _run_model(model, features, actions)
+            loss = behavior_cloning_loss(pred, actions)
+            total += float(loss.detach().cpu()) * features.shape[0]
+            count += features.shape[0]
+    return EvalResult(eval_loss=total / max(count, 1))
 
 
 def _run_model(model: torch.nn.Module, features: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
