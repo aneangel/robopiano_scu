@@ -43,7 +43,7 @@ def main() -> None:
     else:
         print(
             f"WARNING: no splits.csv found at {splits_file}; training on the full manifest "
-            "and selecting best.pt by train loss for backward compatibility."
+            "and selecting best.pt from best_train.pt by train loss for backward compatibility."
         )
         train_split = None
         val_split = None
@@ -160,6 +160,8 @@ def main() -> None:
         "best_alias": str(checkpoint_dir / "best.pt"),
         "split_file": str(splits_file) if has_splits else None,
         "selection_note": "Supervised best checkpoints are preselection only; final selection should use rollout evaluation.",
+        "validation_enabled": val_loader is not None,
+        "split_policy": "splits.csv" if has_splits else "full_manifest_train_loss_only",
     }
     (output_root / "training_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True, default=str),
@@ -243,6 +245,7 @@ def _feature_config(config: dict[str, Any]) -> dict[str, Any]:
     phase_cfg = _as_dict(config.get("phase"))
     return {
         "key_spec": _as_dict(_as_dict(feature_cfg.get("block_kwargs")).get("etude.features.key_blocks:build_key_features", {})).get("spec", {}),
+        "teacher_key_state": bool(feature_cfg.get("teacher_key_state", False)),
         "inverse_dynamics_spec": inverse_cfg,
         "fingertip_spec": {
             "include_current": bool(fingertip_cfg.get("enabled", True)),

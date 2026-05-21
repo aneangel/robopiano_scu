@@ -108,11 +108,22 @@ def test_evaluate_trajectory_payload_reports_planner_native_metrics() -> None:
     assert 0.0 <= metrics["exact_waypoint_anchor_success_rate_020m"] <= 1.0
     assert metrics["ik_anchor_error_weight_ge_1_p95"] >= 0.0
     assert 0.0 <= metrics["ik_anchor_success_rate_020m_weight_ge_1"] <= 1.0
+    assert metrics["press_frame_anchor_error_p95"] >= 0.0
+    assert metrics["prepress_approach_anchor_error_p95"] >= 0.0
+    assert metrics["hold_end_anchor_error_p95"] >= 0.0
+    assert metrics["release_anchor_error_p95"] >= 0.0
+    assert metrics["inactive_clearance_violation_count"] >= 0
+    assert metrics["wrong_key_proximity_violation_count"] >= 0
+    assert metrics["inactive_clearance_violation_rate_per_checked_anchor"] >= 0.0
+    assert metrics["wrong_key_proximity_violation_rate_per_checked_anchor"] >= 0.0
+    assert metrics["ik_anchor_failure_count"] >= 0
+    assert metrics["ik_anchor_optimizer_failure_count"] >= 0
     assert metrics["exact_waypoint_anchor_error_finger_0_p95"] >= 0.0
     assert metrics["exact_waypoint_anchor_error_polyphony_2_p95"] >= 0.0
     assert 0.0 <= metrics["waypoint_success_rate_010m"] <= 1.0
     assert 0.0 <= metrics["waypoint_dense_activity_rate"] <= 1.0
     assert 0.0 <= metrics["waypoint_has_exact_anchor_rate"] <= 1.0
+    assert metrics["online_metrics_status"] == "absent"
     assert metrics["online_metrics_available"] is False
 
 
@@ -127,4 +138,6 @@ def test_evaluate_trajectory_payload_empty_payload_does_not_crash() -> None:
     assert metrics["exact_waypoint_sparse_error_p95"] == 0.0
     assert metrics["exact_waypoint_anchor_error_p95"] == 0.0
     assert metrics["ik_anchor_error_weight_ge_1_p95"] == 0.0
+    assert metrics["press_frame_anchor_error_p95"] == 0.0
+    assert metrics["online_metrics_status"] == "absent"
     assert metrics["online_metrics_available"] is False

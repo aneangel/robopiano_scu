@@ -110,7 +110,7 @@ def test_plan_starts_from_bagatelle_control_qpos_when_first_press_is_later_than_
     np.testing.assert_allclose(impromptu.planned_hand_joints_dense[0], bagatelle.planned_hand_joints[0], atol=1e-6)
 
 
-def test_impromptu_delegates_assignment_and_control_qpos_to_bagatelle() -> None:
+def test_impromptu_delegates_assignment_and_press_seeds_to_bagatelle() -> None:
     target = np.stack([_row(), _row(10), _row(10), _row(12, 16), _row()], axis=0)
     config = ImpromptuConfig(interpolation_substeps=3, ik_max_nfev=2)
 
@@ -121,7 +121,33 @@ def test_impromptu_delegates_assignment_and_control_qpos_to_bagatelle() -> None:
     np.testing.assert_allclose(impromptu.fingertip_targets, bagatelle.fingertip_targets)
     np.testing.assert_allclose(impromptu.waypoint_fingertips, bagatelle.waypoint_fingertips)
     np.testing.assert_allclose(impromptu.waypoint_hand_joints, bagatelle.waypoint_hand_joints)
-    np.testing.assert_allclose(impromptu.planned_hand_joints, bagatelle.planned_hand_joints)
-    np.testing.assert_allclose(impromptu.planned_hand_velocities, bagatelle.planned_hand_velocities)
-    assert impromptu.metadata["ik_source"] == "Bagatelle.plan_target_keys"
+    assert impromptu.metadata["ik_source"] == "Impromptu.solve_fingertip_trajectory_anchors"
     assert impromptu.metadata["assignment_source"] == "Bagatelle.plan_target_keys"
+    assert impromptu.metadata["planned_hand_joints_source"] == "downsampled_from_dense_anchor_ik"
+    assert impromptu.metadata["dense_ik_seed_source"] == "interpolated_bagatelle_control_frame_qpos"
+
+
+def test_anchor_config_changes_planner_anchor_output() -> None:
+    target = np.stack([_row(), _row(10), _row(10), _row(12), _row(), _row(16), _row()], axis=0)
+    dense_config = ImpromptuConfig(
+        interpolation_substeps=4,
+        anchor_stride=1,
+        solve_contact_window_only=False,
+        include_midpoint_anchors=True,
+        ik_max_nfev=2,
+    )
+    sparse_config = ImpromptuConfig(
+        interpolation_substeps=4,
+        anchor_stride=8,
+        solve_contact_window_only=True,
+        include_midpoint_anchors=False,
+        ik_max_nfev=2,
+    )
+
+    dense = plan_target_keys(target, config=dense_config, kinematics=FakeKinematics())
+    sparse = plan_target_keys(target, config=sparse_config, kinematics=FakeKinematics())
+
+    assert dense.ik_anchor_frames_dense.size > sparse.ik_anchor_frames_dense.size
+    assert dense.metadata["selected_anchor_config"]["anchor_stride"] == 1
+    assert sparse.metadata["selected_anchor_config"]["anchor_stride"] == 8
+    assert sparse.metadata["selected_anchor_config"]["solve_contact_window_only"] is True

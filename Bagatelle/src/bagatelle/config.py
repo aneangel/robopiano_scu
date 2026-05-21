@@ -18,6 +18,10 @@ class BagatelleConfig:
     ik_key_height_weight: float = 1.0
     ik_smoothness_weight: float = 0.05
     ik_neutral_weight: float = 0.01
+    ik_inactive_fingertip_clearance_weight: float = 0.0
+    ik_inactive_fingertip_clearance: float = 0.02
+    ik_wrong_key_xy_avoidance_weight: float = 0.0
+    ik_wrong_key_xy_avoidance_radius: float = 0.025
     ik_max_nfev: int = 120
     ik_ftol: float = 1e-5
     ik_xtol: float = 1e-5
@@ -69,6 +73,15 @@ class BagatelleConfig:
     # Candidate generation.
     assignment_top_k: int = 1
     assignment_top_k_extra_penalty: float = 1e-4
+
+    # Whole-sequence assignment search. `assignment_candidates_per_step`
+    # defaults to `assignment_top_k` when set to 0.
+    assignment_beam_width: int = 4
+    assignment_candidates_per_step: int = 0
+    assignment_future_horizon: int = 0
+    assignment_sequence_cost_discount: float = 0.9
+    assignment_fail_if_unassigned: bool = False
+    assignment_unassigned_penalty: float = 25.0
 
     # IK-aware selection.
     assignment_ik_residual_weight: float = 0.0

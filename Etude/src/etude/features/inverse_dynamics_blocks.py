@@ -16,6 +16,12 @@ class InverseDynamicsFeatureSpec:
     condition_on_previous_action: bool = True
     zero_fill_missing: bool = True
 
+    def __post_init__(self) -> None:
+        if int(self.desired_state_horizon) < 0:
+            raise ValueError("desired_state_horizon must be non-negative")
+        if any(int(step) < 0 for step in self.future_steps):
+            raise ValueError("future_steps must be non-negative")
+
 
 def build_inverse_dynamics_features(
     *,

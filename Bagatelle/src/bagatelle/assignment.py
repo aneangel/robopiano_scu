@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 import numpy as np
@@ -92,6 +92,14 @@ class FingerAssignmentCandidate:
     result: FingerAssignmentResult
     base_cost: float
     rank: int
+
+
+@dataclass(frozen=True)
+class _AssignmentBeamState:
+    previous_fingertips: np.ndarray
+    previous_assignment: np.ndarray
+    cumulative_cost: float
+    results: tuple[FingerAssignmentResult, ...]
 
 
 def is_left_finger(finger_index: int) -> bool:
@@ -567,6 +575,58 @@ def assignment_crossing_penalty(
     return float(penalty)
 
 
+def _candidate_signature(result: FingerAssignmentResult) -> tuple[int, ...]:
+    return tuple(result.dense_key_by_finger().astype(int).tolist())
+
+
+def _rank_candidate_results(results: list[FingerAssignmentCandidate], top_k: int) -> list[FingerAssignmentCandidate]:
+    results.sort(
+        key=lambda candidate: (
+            float(candidate.base_cost),
+            tuple(candidate.result.assigned_finger_indices.astype(int).tolist()),
+            tuple(candidate.result.assigned_keys.astype(int).tolist()),
+        )
+    )
+    ranked: list[FingerAssignmentCandidate] = []
+    for rank, candidate in enumerate(results[:top_k]):
+        ranked_result = replace(candidate.result, candidate_rank=rank)
+        ranked.append(FingerAssignmentCandidate(result=ranked_result, base_cost=float(candidate.base_cost), rank=rank))
+    return ranked
+
+
+def _crossed_selected_pairs(result: FingerAssignmentResult) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    fingers = result.assigned_finger_indices.astype(np.int32)
+    keys = result.assigned_keys.astype(np.int32)
+    key_positions = result.assigned_key_positions.astype(np.int32)
+    for hand in (LEFT_HAND_FINGERS, RIGHT_HAND_FINGERS):
+        hand_mask = np.isin(fingers, np.asarray(hand, dtype=np.int32))
+        hand_fingers = fingers[hand_mask]
+        hand_keys = keys[hand_mask]
+        hand_positions = key_positions[hand_mask]
+        for left_index in range(hand_fingers.size):
+            for right_index in range(left_index + 1, hand_fingers.size):
+                left_finger = int(hand_fingers[left_index])
+                right_finger = int(hand_fingers[right_index])
+                if left_finger == right_finger:
+                    continue
+                if left_finger > right_finger:
+                    left_finger, right_finger = right_finger, left_finger
+                    left_key = int(hand_keys[right_index])
+                    right_key = int(hand_keys[left_index])
+                    left_position = int(hand_positions[right_index])
+                    right_position = int(hand_positions[left_index])
+                else:
+                    left_key = int(hand_keys[left_index])
+                    right_key = int(hand_keys[right_index])
+                    left_position = int(hand_positions[left_index])
+                    right_position = int(hand_positions[right_index])
+                if left_key > right_key:
+                    pairs.append((left_finger, left_position))
+                    pairs.append((right_finger, right_position))
+    return pairs
+
+
 def generate_assignment_candidates(
     active_keys: np.ndarray,
     previous_fingertips: np.ndarray,
@@ -601,7 +661,7 @@ def generate_assignment_candidates(
         )
         return [FingerAssignmentCandidate(result=legacy, base_cost=float(legacy.total_cost), rank=0)]
 
-    if strategy not in {"composite_cost", "ik_aware_topk"}:
+    if strategy not in {"composite_cost", "ik_aware_topk", "sequence_beam"}:
         raise ValueError(f"Unknown Bagatelle assignment_strategy: {strategy}")
 
     base_cost, cost_components = build_composite_assignment_cost(
@@ -612,78 +672,77 @@ def generate_assignment_candidates(
         previous_assignment=dense_previous,
     )
     stored_components = cost_components if bool(getattr(config, "assignment_store_cost_components", True)) else None
-    base_result = _result_from_cost(
-        keys=keys,
-        targets=targets,
-        cost=base_cost,
-        strategy=strategy,
-        cost_components=stored_components,
-        candidate_rank=0,
-    )
-    candidates: list[FingerAssignmentCandidate] = [
-        FingerAssignmentCandidate(result=base_result, base_cost=float(base_result.total_cost), rank=0)
-    ]
-    if top_k <= 1 or base_result.count == 0:
-        return candidates
+    candidates: list[FingerAssignmentCandidate] = []
+    seen: set[tuple[int, ...]] = set()
 
-    seen = {
-        (
-            tuple(base_result.assigned_finger_indices.astype(int).tolist()),
-            tuple(base_result.assigned_keys.astype(int).tolist()),
-        )
-    }
-    perturb_scale = float(getattr(config, "assignment_top_k_extra_penalty", 1e-4))
-    perturb_targets = list(zip(base_result.assigned_finger_indices.tolist(), base_result.assigned_key_positions.tolist()))
-    candidate_rank = 1
-    for finger_index, key_position in perturb_targets:
-        if len(candidates) >= top_k:
-            break
-        perturbed = np.array(base_cost, copy=True)
-        perturbed[int(finger_index), int(key_position)] += perturb_scale * float(candidate_rank)
+    def add_candidate(cost: np.ndarray, rank_hint: int) -> None:
         result = _result_from_cost(
             keys=keys,
             targets=targets,
-            cost=perturbed,
+            cost=cost,
             strategy=strategy,
             cost_components=stored_components,
-            candidate_rank=candidate_rank,
+            candidate_rank=rank_hint,
         )
-        signature = (
-            tuple(result.assigned_finger_indices.astype(int).tolist()),
-            tuple(result.assigned_keys.astype(int).tolist()),
-        )
+        signature = _candidate_signature(result)
         if signature in seen:
-            continue
+            return
         seen.add(signature)
-        candidates.append(FingerAssignmentCandidate(result=result, base_cost=float(result.total_cost), rank=candidate_rank))
+        candidates.append(
+            FingerAssignmentCandidate(result=result, base_cost=float(result.total_cost), rank=rank_hint)
+        )
+
+    add_candidate(base_cost, 0)
+    base_result = candidates[0].result
+    if top_k <= 1 or base_result.count == 0:
+        return candidates
+
+    perturb_scale = float(getattr(config, "assignment_top_k_extra_penalty", 1e-4))
+    variant_scale = max(perturb_scale, 1e-3)
+    perturb_targets = list(zip(base_result.assigned_finger_indices.tolist(), base_result.assigned_key_positions.tolist()))
+    candidate_rank = 1
+    for finger_index, key_position in perturb_targets:
+        perturbed = np.array(base_cost, copy=True)
+        perturbed[int(finger_index), int(key_position)] += perturb_scale * float(candidate_rank)
+        add_candidate(perturbed, candidate_rank)
         candidate_rank += 1
 
-    candidates.sort(
-        key=lambda candidate: (
-            float(candidate.base_cost),
-            tuple(candidate.result.assigned_finger_indices.astype(int).tolist()),
-            tuple(candidate.result.assigned_keys.astype(int).tolist()),
-        )
-    )
-    ranked: list[FingerAssignmentCandidate] = []
-    for rank, candidate in enumerate(candidates):
-        ranked_result = FingerAssignmentResult(
-            active_keys=candidate.result.active_keys,
-            assigned_finger_indices=candidate.result.assigned_finger_indices,
-            assigned_keys=candidate.result.assigned_keys,
-            assigned_key_positions=candidate.result.assigned_key_positions,
-            target_positions=candidate.result.target_positions,
-            unassigned_keys=candidate.result.unassigned_keys,
-            cost_matrix=candidate.result.cost_matrix,
-            total_cost=candidate.result.total_cost,
-            mean_cost=candidate.result.mean_cost,
-            strategy=candidate.result.strategy,
-            cost_components=candidate.result.cost_components,
-            candidate_rank=rank,
-            candidate_score=candidate.result.candidate_score,
-        )
-        ranked.append(FingerAssignmentCandidate(result=ranked_result, base_cost=float(candidate.base_cost), rank=rank))
-    return ranked[:top_k]
+    for first_index, (first_finger, first_key_position) in enumerate(perturb_targets):
+        for second_finger, second_key_position in perturb_targets[first_index + 1 :]:
+            if len(candidates) >= max(top_k * 3, top_k + 4):
+                break
+            perturbed = np.array(base_cost, copy=True)
+            perturbed[int(first_finger), int(first_key_position)] += perturb_scale * float(candidate_rank)
+            perturbed[int(second_finger), int(second_key_position)] += perturb_scale * float(candidate_rank)
+            add_candidate(perturbed, candidate_rank)
+            candidate_rank += 1
+
+    middle_key = int(getattr(config, "assignment_middle_key", 44))
+    hand_split = np.array(base_cost, copy=True)
+    for finger_index in range(NUM_FINGERS):
+        wrong_side = keys >= middle_key if is_left_finger(finger_index) else keys < middle_key
+        hand_split[finger_index, wrong_side] += float(getattr(config, "assignment_wrong_hand_penalty", 1.0)) + variant_scale
+    add_candidate(hand_split, candidate_rank)
+    candidate_rank += 1
+
+    if dense_previous is not None:
+        hold_variant = np.array(base_cost, copy=True)
+        for key_position, key in enumerate(keys.astype(np.int32).tolist()):
+            owners = np.where(dense_previous == int(key))[0]
+            if owners.size:
+                hold_variant[:, key_position] += variant_scale
+                hold_variant[int(owners[0]), key_position] -= 2.0 * variant_scale
+        add_candidate(hold_variant, candidate_rank)
+        candidate_rank += 1
+
+    crossed_pairs = _crossed_selected_pairs(base_result)
+    if crossed_pairs:
+        crossing_variant = np.array(base_cost, copy=True)
+        for finger_index, key_position in crossed_pairs:
+            crossing_variant[int(finger_index), int(key_position)] += variant_scale
+        add_candidate(crossing_variant, candidate_rank)
+
+    return _rank_candidate_results(candidates, top_k)
 
 
 def assign_fingers_previous_pose_lookahead(
@@ -765,6 +824,155 @@ def assign_fingers_sequence_lookahead(
     return results
 
 
+def _sequence_unassigned_penalty(result: FingerAssignmentResult, config: object | None) -> float:
+    if result.unassigned_keys.size == 0:
+        return 0.0
+    if bool(getattr(config, "assignment_fail_if_unassigned", False)):
+        return float("inf")
+    return float(getattr(config, "assignment_unassigned_penalty", 25.0)) * float(result.unassigned_keys.size)
+
+
+def _assignment_future_heuristic(
+    *,
+    active_key_sequence: Sequence[np.ndarray],
+    key_target_sequence: Sequence[np.ndarray],
+    start_index: int,
+    previous_fingertips: np.ndarray,
+    previous_assignment: np.ndarray,
+    config: object | None,
+) -> float:
+    horizon = max(int(getattr(config, "assignment_future_horizon", 0)), 0)
+    if horizon <= 0:
+        return 0.0
+    discount = float(getattr(config, "assignment_sequence_cost_discount", 0.9))
+    discount = min(max(discount, 0.0), 1.0)
+    estimate = 0.0
+    weight = discount
+    fingertips = np.asarray(previous_fingertips, dtype=np.float32).copy()
+    dense = np.asarray(previous_assignment, dtype=np.int32).copy()
+    stop = min(len(active_key_sequence), start_index + 1 + horizon)
+    for future_index in range(start_index + 1, stop):
+        future_candidates = generate_assignment_candidates(
+            active_key_sequence[future_index],
+            fingertips,
+            key_target_sequence[future_index],
+            config,
+            max_candidates=1,
+            previous_assignment=dense,
+        )
+        if not future_candidates:
+            continue
+        candidate = future_candidates[0]
+        crossing = assignment_crossing_penalty(
+            candidate.result.assigned_finger_indices,
+            candidate.result.assigned_keys,
+            config,
+        )
+        local = (
+            float(candidate.base_cost)
+            + float(getattr(config, "assignment_crossing_weight", 0.0)) * float(crossing)
+            + _sequence_unassigned_penalty(candidate.result, config)
+        )
+        estimate += weight * local
+        fingertips = _assignment_next_fingertips(fingertips, candidate.result)
+        dense = _assignment_next_keys(dense, candidate.result)
+        weight *= discount
+    return float(estimate)
+
+
+def assign_fingers_sequence_beam(
+    active_key_sequence: Sequence[np.ndarray],
+    initial_fingertips: np.ndarray,
+    key_target_sequence: Sequence[np.ndarray],
+    *,
+    config: object | None = None,
+    beam_width: int | None = None,
+    candidates_per_step: int | None = None,
+) -> list[FingerAssignmentResult]:
+    if len(active_key_sequence) != len(key_target_sequence):
+        raise ValueError("active_key_sequence and key_target_sequence must have the same length")
+    width = max(int(beam_width if beam_width is not None else getattr(config, "assignment_beam_width", 4)), 1)
+    per_step = int(
+        candidates_per_step
+        if candidates_per_step is not None
+        else getattr(config, "assignment_candidates_per_step", 0)
+    )
+    if per_step <= 0:
+        per_step = int(getattr(config, "assignment_top_k", 1))
+    per_step = max(per_step, 1)
+
+    initial = _AssignmentBeamState(
+        previous_fingertips=np.asarray(initial_fingertips, dtype=np.float32).copy(),
+        previous_assignment=np.full((NUM_FINGERS,), -1, dtype=np.int32),
+        cumulative_cost=0.0,
+        results=(),
+    )
+    beam = [initial]
+    for waypoint_index, (active_keys, key_targets) in enumerate(zip(active_key_sequence, key_target_sequence)):
+        expansions: list[tuple[float, _AssignmentBeamState]] = []
+        for state in beam:
+            candidates = generate_assignment_candidates(
+                active_keys,
+                state.previous_fingertips,
+                key_targets,
+                config,
+                max_candidates=per_step,
+                previous_assignment=state.previous_assignment,
+            )
+            for candidate in candidates:
+                crossing = assignment_crossing_penalty(
+                    candidate.result.assigned_finger_indices,
+                    candidate.result.assigned_keys,
+                    config,
+                )
+                local_cost = (
+                    float(candidate.base_cost)
+                    + float(getattr(config, "assignment_crossing_weight", 0.0)) * float(crossing)
+                    + _sequence_unassigned_penalty(candidate.result, config)
+                )
+                if not np.isfinite(local_cost):
+                    continue
+                next_fingertips = _assignment_next_fingertips(state.previous_fingertips, candidate.result)
+                next_assignment = _assignment_next_keys(state.previous_assignment, candidate.result)
+                cumulative = float(state.cumulative_cost + local_cost)
+                heuristic = _assignment_future_heuristic(
+                    active_key_sequence=active_key_sequence,
+                    key_target_sequence=key_target_sequence,
+                    start_index=waypoint_index,
+                    previous_fingertips=next_fingertips,
+                    previous_assignment=next_assignment,
+                    config=config,
+                )
+                scored_result = replace(
+                    candidate.result,
+                    strategy="sequence_beam",
+                    candidate_rank=int(candidate.rank),
+                    candidate_score=float(cumulative + heuristic),
+                )
+                expansions.append(
+                    (
+                        float(cumulative + heuristic),
+                        _AssignmentBeamState(
+                            previous_fingertips=next_fingertips,
+                            previous_assignment=next_assignment,
+                            cumulative_cost=cumulative,
+                            results=state.results + (scored_result,),
+                        ),
+                    )
+                )
+        if not expansions:
+            raise RuntimeError("sequence_beam found no feasible assignment path")
+        expansions.sort(
+            key=lambda item: (
+                float(item[0]),
+                tuple(item[1].previous_assignment.astype(int).tolist()),
+            )
+        )
+        beam = [state for _, state in expansions[:width]]
+    beam.sort(key=lambda state: (float(state.cumulative_cost), tuple(state.previous_assignment.astype(int).tolist())))
+    return list(beam[0].results) if beam else []
+
+
 def assign_fingers_previous_pose(
     active_keys: np.ndarray,
     previous_fingertips: np.ndarray,
@@ -806,7 +1014,7 @@ def assign_fingers_previous_pose(
             cost = cost + alpha * bias.astype(np.float64)
         return _result_from_cost(keys=keys, targets=targets, cost=cost, strategy=strategy)
 
-    if strategy in {"composite_cost", "ik_aware_topk"}:
+    if strategy in {"composite_cost", "ik_aware_topk", "sequence_beam"}:
         cost, cost_components = build_composite_assignment_cost(
             keys,
             targets,

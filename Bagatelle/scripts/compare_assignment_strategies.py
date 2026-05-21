@@ -97,6 +97,25 @@ def main() -> None:
             assignment_motion_weight=0.05,
             assignment_ik_failure_penalty=10.0,
         ),
+        "sequence_beam": BagatelleConfig(
+            assignment_strategy="sequence_beam",
+            assignment_distance_weight=1.0,
+            assignment_hand_zone_weight=0.25,
+            assignment_finger_zone_weight=0.10,
+            assignment_crossing_weight=0.50,
+            assignment_hold_weight=2.0,
+            assignment_reach_weight=0.50,
+            assignment_black_key_weight=0.05,
+            assignment_wrong_hand_penalty=2.0,
+            assignment_top_k=8,
+            assignment_beam_width=4,
+            assignment_candidates_per_step=8,
+            assignment_ik_residual_weight=5.0,
+            assignment_ik_max_residual_weight=5.0,
+            assignment_motion_weight=0.05,
+            assignment_ik_failure_penalty=10.0,
+            assignment_unassigned_penalty=25.0,
+        ),
     }
 
     results = {

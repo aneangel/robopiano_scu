@@ -85,6 +85,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-neutral-weight", type=float, default=0.02)
     parser.add_argument("--ik-max-nfev", type=int, default=80)
     parser.add_argument("--residual-success-threshold", type=float, default=0.018)
+    parser.add_argument("--enable-trajectory-refinement", action="store_true")
+    parser.add_argument("--trajectory-refinement-window-frames", type=int, default=24)
+    parser.add_argument("--trajectory-refinement-max-nfev", type=int, default=20)
+    parser.add_argument("--trajectory-refinement-fingertip-weight", type=float, default=1.0)
+    parser.add_argument("--trajectory-refinement-velocity-weight", type=float, default=0.005)
+    parser.add_argument("--trajectory-refinement-acceleration-weight", type=float, default=0.002)
+    parser.add_argument("--trajectory-refinement-jerk-weight", type=float, default=0.001)
+    parser.add_argument("--trajectory-refinement-neutral-weight", type=float, default=0.001)
+    parser.add_argument("--trajectory-refinement-endpoint-weight", type=float, default=0.05)
     return parser
 
 
@@ -165,6 +174,15 @@ def main() -> None:
         ik_neutral_weight=float(args.ik_neutral_weight),
         ik_max_nfev=int(args.ik_max_nfev),
         residual_success_threshold=float(args.residual_success_threshold),
+        enable_trajectory_refinement=bool(args.enable_trajectory_refinement),
+        trajectory_refinement_window_frames=int(args.trajectory_refinement_window_frames),
+        trajectory_refinement_max_nfev=int(args.trajectory_refinement_max_nfev),
+        trajectory_refinement_fingertip_weight=float(args.trajectory_refinement_fingertip_weight),
+        trajectory_refinement_velocity_weight=float(args.trajectory_refinement_velocity_weight),
+        trajectory_refinement_acceleration_weight=float(args.trajectory_refinement_acceleration_weight),
+        trajectory_refinement_jerk_weight=float(args.trajectory_refinement_jerk_weight),
+        trajectory_refinement_neutral_weight=float(args.trajectory_refinement_neutral_weight),
+        trajectory_refinement_endpoint_weight=float(args.trajectory_refinement_endpoint_weight),
         output_root=str(Path(args.output_root).expanduser()),
     )
     plan = plan_target_keys(target_keys, config=config)

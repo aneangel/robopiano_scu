@@ -106,6 +106,7 @@ def solve_fingertip_frame(
     previous_qpos: np.ndarray,
     neutral_qpos: np.ndarray,
     config: ImpromptuConfig,
+    initial_qpos: np.ndarray | None = None,
 ) -> IKResult:
     targets = np.asarray(fingertip_targets, dtype=np.float32)
     weights = np.asarray(fingertip_weights, dtype=np.float32).reshape(-1)
@@ -114,6 +115,7 @@ def solve_fingertip_frame(
     if weights.shape != (10,):
         raise ValueError(f"fingertip_weights must have shape [10], got {weights.shape}")
     previous = _clip_qpos(kin, previous_qpos)
+    initial = previous if initial_qpos is None else _clip_qpos(kin, initial_qpos)
     neutral = _clip_qpos(kin, neutral_qpos)
     mask = np.isfinite(targets).all(axis=1) & (weights > 0.0)
     finger_indices = np.flatnonzero(mask).astype(np.int32)
@@ -188,7 +190,7 @@ def solve_fingertip_frame(
     try:
         opt = least_squares(
             residual,
-            previous.astype(np.float64),
+            initial.astype(np.float64),
             bounds=(np.asarray(kin.joint_lower, dtype=np.float64), np.asarray(kin.joint_upper, dtype=np.float64)),
             max_nfev=max(int(config.ik_max_nfev), 1),
             ftol=float(config.ik_ftol),
@@ -238,12 +240,28 @@ def solve_fingertip_trajectory_anchors(
     frames = np.asarray(anchor_frames, dtype=np.int64).reshape(-1)
     targets = np.asarray(fingertip_targets, dtype=np.float32)
     weights = np.asarray(fingertip_weights, dtype=np.float32)
-    previous = _clip_qpos(kin, initial_qpos)
+    initial = np.asarray(initial_qpos, dtype=np.float32)
+    if initial.ndim == 1:
+        seed_rows = np.repeat(initial.reshape(1, -1), frames.size, axis=0)
+    elif initial.ndim == 2 and initial.shape[0] == frames.size:
+        seed_rows = initial
+    else:
+        raise ValueError(
+            "initial_qpos must be a single qpos row or one qpos row per anchor; "
+            f"got {initial.shape} for {frames.size} anchors"
+        )
+    if seed_rows.size:
+        previous_seed = seed_rows[0]
+    elif initial.ndim == 1:
+        previous_seed = initial
+    else:
+        previous_seed = np.asarray(neutral_qpos, dtype=np.float32)
+    previous = _clip_qpos(kin, previous_seed)
     qpos_rows: list[np.ndarray] = []
     fingertip_rows: list[np.ndarray] = []
     metric_rows: list[np.ndarray] = []
     results: list[IKResult] = []
-    for frame in frames:
+    for row, frame in enumerate(frames):
         index = int(frame)
         result = solve_fingertip_frame(
             kin=kin,
@@ -252,6 +270,7 @@ def solve_fingertip_trajectory_anchors(
             previous_qpos=previous,
             neutral_qpos=neutral_qpos,
             config=config,
+            initial_qpos=seed_rows[row],
         )
         qpos_rows.append(result.pose.astype(np.float32))
         fingertip_rows.append(result.fingertip_positions.astype(np.float32))

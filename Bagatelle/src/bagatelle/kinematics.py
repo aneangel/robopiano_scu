@@ -16,6 +16,27 @@ from bagatelle.paths import ensure_repo_paths
 
 
 HAND_STATE_DIM = 46
+FINGER_ORDER = "left_hand_sites_then_right_hand_sites"
+JOINT_ORDER = "right_hand_joints_then_left_hand_joints"
+JOINT_INDEX_RANGES_BY_HAND = {
+    "right_hand": [0, 23],
+    "left_hand": [23, 46],
+}
+FINGER_HAND_LABELS = ("left", "left", "left", "left", "left", "right", "right", "right", "right", "right")
+FINGER_NAMES = ("thumb", "index", "middle", "ring", "little", "thumb", "index", "middle", "ring", "little")
+
+
+def _model_element_name(element: Any) -> str:
+    for attr in ("full_identifier", "identifier", "name"):
+        value = getattr(element, attr, None)
+        if callable(value):
+            try:
+                value = value()
+            except TypeError:
+                pass
+        if value:
+            return str(value)
+    return str(element)
 
 
 @dataclass(frozen=True)
@@ -157,6 +178,36 @@ class BagatelleKinematics:
     def joint_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         return self.joint_lower.copy(), self.joint_upper.copy()
 
+    @property
+    def fingertip_site_names(self) -> tuple[str, ...]:
+        return tuple(_model_element_name(site) for site in self.fingertip_sites)
+
+    @property
+    def joint_names(self) -> tuple[str, ...]:
+        return tuple(_model_element_name(joint) for joint in self.joint_handles)
+
+    @property
+    def joint_index_ranges_by_hand(self) -> dict[str, list[int]]:
+        return {hand: list(bounds) for hand, bounds in JOINT_INDEX_RANGES_BY_HAND.items()}
+
+    @property
+    def order_metadata(self) -> dict[str, Any]:
+        site_names = list(self.fingertip_site_names)
+        joint_names = list(self.joint_names)
+        return {
+            "finger_order": FINGER_ORDER,
+            "joint_order": JOINT_ORDER,
+            "fingertip_site_names": site_names,
+            "joint_names": joint_names,
+            "finger_hands": list(FINGER_HAND_LABELS),
+            "finger_names": list(FINGER_NAMES),
+            "assignment_finger_to_site": [
+                {"finger_index": index, "site_name": name}
+                for index, name in enumerate(site_names)
+            ],
+            "joint_index_ranges_by_hand": self.joint_index_ranges_by_hand,
+        }
+
     def _repair_bounds(self) -> None:
         for index in range(HAND_STATE_DIM):
             lo = float(self.joint_lower[index])
@@ -267,6 +318,18 @@ class BagatelleKinematics:
             [cfg.ik_key_front_weight, cfg.ik_key_width_weight, cfg.ik_key_height_weight],
             dtype=np.float64,
         )
+        inactive_clearance_weight = float(getattr(cfg, "ik_inactive_fingertip_clearance_weight", 0.0))
+        inactive_clearance = float(getattr(cfg, "ik_inactive_fingertip_clearance", 0.02))
+        wrong_key_weight = float(getattr(cfg, "ik_wrong_key_xy_avoidance_weight", 0.0))
+        wrong_key_radius = max(float(getattr(cfg, "ik_wrong_key_xy_avoidance_radius", 0.025)), 1e-6)
+        inactive_indices = np.setdiff1d(np.arange(NUM_FINGERS, dtype=np.int64), finger_indices, assume_unique=False)
+        clearance_z = float(np.max(target_positions[:, 2]) + inactive_clearance) if target_positions.size else 0.0
+        wrong_key_xy = np.zeros((0, 2), dtype=np.float32)
+        if wrong_key_weight > 0.0:
+            all_keys = np.arange(int(self.piano.n_keys), dtype=np.int32)
+            assigned_key_set = set(int(key) for key in assignments.assigned_keys.tolist())
+            wrong_keys = np.asarray([int(key) for key in all_keys if int(key) not in assigned_key_set], dtype=np.int32)
+            wrong_key_xy = self.key_contact_targets(wrong_keys)[:, :2] if wrong_keys.size else wrong_key_xy
 
         def residual(values: np.ndarray) -> np.ndarray:
             q = self.clip_qpos(values)
@@ -277,6 +340,14 @@ class BagatelleKinematics:
                 (q - previous).reshape(-1) * float(cfg.ik_smoothness_weight),
                 (q - neutral).reshape(-1) * float(cfg.ik_neutral_weight),
             ]
+            if inactive_clearance_weight > 0.0 and inactive_indices.size:
+                clearance_error = np.maximum(clearance_z - fingertips[inactive_indices, 2], 0.0)
+                parts.append(clearance_error.reshape(-1) * inactive_clearance_weight)
+            if wrong_key_weight > 0.0 and wrong_key_xy.size:
+                assigned_xy = fingertips[finger_indices, :2]
+                xy_distance = np.linalg.norm(assigned_xy[:, None, :] - wrong_key_xy[None, :, :], axis=2)
+                avoid_error = np.maximum(wrong_key_radius - xy_distance, 0.0) / wrong_key_radius
+                parts.append(avoid_error.reshape(-1) * wrong_key_weight)
             return np.concatenate(parts, axis=0).astype(np.float64)
 
         try:

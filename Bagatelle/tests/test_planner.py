@@ -28,6 +28,21 @@ class FakeKinematics:
         self.environment_name = "fake-env"
         self.midi_proto_path = "fake.proto"
         self.load_info = {}
+        self.fingertip_site_names = tuple(f"site_{index}" for index in range(10))
+        self.joint_names = tuple(f"joint_{index}" for index in range(46))
+        self.order_metadata = {
+            "finger_order": "left_hand_sites_then_right_hand_sites",
+            "joint_order": "right_hand_joints_then_left_hand_joints",
+            "fingertip_site_names": list(self.fingertip_site_names),
+            "joint_names": list(self.joint_names),
+            "finger_hands": ["left"] * 5 + ["right"] * 5,
+            "finger_names": ["thumb", "index", "middle", "ring", "little"] * 2,
+            "assignment_finger_to_site": [
+                {"finger_index": index, "site_name": name}
+                for index, name in enumerate(self.fingertip_site_names)
+            ],
+            "joint_index_ranges_by_hand": {"right_hand": [0, 23], "left_hand": [23, 46]},
+        }
 
     def close(self) -> None:
         raise AssertionError("plan_target_keys must not close caller-owned kinematics")
@@ -128,3 +143,21 @@ def test_plan_target_keys_reports_legacy_assignment_strategy() -> None:
     plan = plan_target_keys(np.stack([_row(1), _row(2)], axis=0), config=BagatelleConfig(), kinematics=FakeKinematics())
 
     assert plan.metadata["assignment_strategy"] == "legacy_previous_pose"
+
+
+def test_metadata_records_finger_joint_and_target_contracts() -> None:
+    plan = plan_target_keys(np.stack([_row(1), _row(2)], axis=0), config=BagatelleConfig(), kinematics=FakeKinematics())
+    metadata = plan.metadata
+
+    assert metadata["finger_order"] == "left_hand_sites_then_right_hand_sites"
+    assert metadata["joint_order"] == "right_hand_joints_then_left_hand_joints"
+    assert metadata["fingertip_site_names"] == [f"site_{index}" for index in range(10)]
+    assert metadata["joint_names"] == [f"joint_{index}" for index in range(46)]
+    assert metadata["finger_hands"] == ["left"] * 5 + ["right"] * 5
+    assert metadata["finger_names"] == ["thumb", "index", "middle", "ring", "little"] * 2
+    assert metadata["assignment_finger_to_site"][5] == {"finger_index": 5, "site_name": "site_5"}
+    assert metadata["joint_index_ranges_by_hand"] == {"right_hand": [0, 23], "left_hand": [23, 46]}
+    assert metadata["key_target_mode"] == "press"
+    assert metadata["key_target_parameters"] == {"front_offset": 0.35, "top_offset": 0.5, "press_depth": 0.008}
+    assert metadata["ik_solver"]["weights"]["inactive_fingertip_clearance"] == 0.0
+    assert len(metadata["per_waypoint_residual_histograms"]) == 2

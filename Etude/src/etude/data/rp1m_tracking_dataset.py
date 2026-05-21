@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from etude.data.feature_builder import FeatureSpec, build_tracking_features
+from etude.data.target_schema import standardize_controller_metadata
 from etude.features.fingertip_phase_blocks import (
     FingertipFeatureSpec,
     PhaseFeatureSpec,
@@ -52,6 +53,7 @@ class RP1MTrackingDataset(Dataset):
                     f"Requested split={split!r}, but split file does not exist: {split_path}"
                 )
             splits = pd.read_csv(split_path)
+            validate_split_integrity(self.manifest, splits, split_path=split_path)
             if "split" not in splits.columns:
                 raise ValueError(f"Split file must contain a 'split' column: {split_path}")
             if "episode_id" in self.manifest.columns and "episode_id" in splits.columns:
@@ -113,6 +115,11 @@ class RP1MTrackingDataset(Dataset):
         previous_action: np.ndarray,
     ) -> np.ndarray:
         if self.feature_mode == "tracking":
+            metadata = standardize_controller_metadata(
+                episode,
+                q_ref=episode["q_ref"],
+                qdot_ref=episode["qdot_ref"],
+            )
             return build_tracking_features(
                 q=episode["q"][t],
                 qdot=episode["qdot"][t],
@@ -122,6 +129,7 @@ class RP1MTrackingDataset(Dataset):
                 previous_action=previous_action,
                 target_keys=episode.get("target_keys"),
                 fingertips=episode.get("fingertips"),
+                metadata=metadata,
                 spec=self.feature_spec,
             )
 
@@ -130,8 +138,14 @@ class RP1MTrackingDataset(Dataset):
             return build_key_features(
                 t=t,
                 target_keys=episode.get("target_keys"),
-                key_state=episode.get("target_keys"),
-                metadata={"dt": float(episode.get("dt", 0.005))},
+                key_state=episode.get("target_keys")
+                if bool(self.feature_config.get("teacher_key_state", False))
+                else episode.get("key_state"),
+                metadata=standardize_controller_metadata(
+                    episode,
+                    horizon=episode["q_ref"].shape[0],
+                    dt=float(episode.get("dt", 0.005)),
+                ),
                 spec=KeyFeatureSpec(**block_cfg) if block_cfg else None,
             )
 
@@ -147,7 +161,11 @@ class RP1MTrackingDataset(Dataset):
             inactive = episode.get("inactive_finger_mask")
             return build_fingertip_phase_features(
                 t=t,
-                metadata={"dt": float(episode.get("dt", 0.005))},
+                metadata=standardize_controller_metadata(
+                    episode,
+                    horizon=episode["q_ref"].shape[0],
+                    dt=float(episode.get("dt", 0.005)),
+                ),
                 target_keys=episode.get("target_keys"),
                 current_fingertips=current,
                 desired_fingertips=desired_t,
@@ -173,6 +191,44 @@ class RP1MTrackingDataset(Dataset):
             )
 
         raise ValueError(f"Unsupported RP1MTrackingDataset feature_mode: {self.feature_mode}")
+
+
+def validate_split_integrity(
+    manifest: pd.DataFrame,
+    splits: pd.DataFrame,
+    *,
+    split_path: str | Path | None = None,
+) -> dict[str, int]:
+    """Validate that split membership is explicit and mutually exclusive."""
+    label = str(split_path) if split_path is not None else "splits.csv"
+    if "split" not in splits.columns:
+        raise ValueError(f"Split file must contain a 'split' column: {label}")
+    identifier = _split_identifier_column(manifest, splits, label=label)
+    split_rows = splits[[identifier, "split"]].copy()
+    split_rows[identifier] = split_rows[identifier].astype(str)
+    split_rows["split"] = split_rows["split"].astype(str)
+    duplicated_rows = split_rows.duplicated(subset=[identifier, "split"], keep=False)
+    if bool(duplicated_rows.any()):
+        values = sorted(split_rows.loc[duplicated_rows, identifier].unique().tolist())[:5]
+        raise ValueError(f"Duplicate split rows in {label} for {identifier}: {values}")
+    memberships = split_rows.groupby(identifier)["split"].nunique()
+    overlaps = sorted(memberships[memberships > 1].index.astype(str).tolist())
+    if overlaps:
+        raise ValueError(f"Split leakage in {label}; {identifier} appears in multiple splits: {overlaps[:5]}")
+    manifest_ids = set(manifest[identifier].astype(str))
+    split_ids = set(split_rows[identifier])
+    missing = sorted(manifest_ids - split_ids)
+    if missing:
+        raise ValueError(f"Split file {label} is missing manifest {identifier} values: {missing[:5]}")
+    return {str(key): int(value) for key, value in split_rows["split"].value_counts().to_dict().items()}
+
+
+def _split_identifier_column(manifest: pd.DataFrame, splits: pd.DataFrame, *, label: str) -> str:
+    if "episode_id" in manifest.columns and "episode_id" in splits.columns:
+        return "episode_id"
+    if "path" in manifest.columns and "path" in splits.columns:
+        return "path"
+    raise ValueError(f"Split file must contain episode_id or path for filtering: {label}")
 
 
 def _reshape_fingertips(value: np.ndarray | None) -> np.ndarray | None:

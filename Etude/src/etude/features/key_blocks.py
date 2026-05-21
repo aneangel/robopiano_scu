@@ -21,6 +21,12 @@ class KeyFeatureSpec:
     zero_fill_missing: bool = True
     active_threshold: float = 0.5
 
+    def __post_init__(self) -> None:
+        if any(int(step) < 0 for step in self.lookahead_steps):
+            raise ValueError("lookahead_steps must be non-negative")
+        if int(self.density_horizon) < 1:
+            raise ValueError("density_horizon must be >= 1")
+
 
 def build_key_features(
     *,

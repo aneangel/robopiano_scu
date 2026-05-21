@@ -67,13 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--assignment-strategy",
         default="legacy_previous_pose",
-        choices=("legacy_previous_pose", "composite_cost", "ik_aware_topk"),
+        choices=("legacy_previous_pose", "composite_cost", "ik_aware_topk", "sequence_beam"),
     )
     parser.add_argument("--assignment-top-k", type=int, default=1)
+    parser.add_argument("--assignment-beam-width", type=int, default=4)
+    parser.add_argument("--assignment-candidates-per-step", type=int, default=0)
+    parser.add_argument("--assignment-future-horizon", type=int, default=0)
+    parser.add_argument("--assignment-sequence-cost-discount", type=float, default=0.9)
+    parser.add_argument("--assignment-unassigned-penalty", type=float, default=25.0)
+    parser.add_argument("--assignment-fail-if-unassigned", action="store_true")
     parser.add_argument("--assignment-distance-weight", type=float, default=1.0)
     parser.add_argument("--assignment-hand-zone-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-finger-zone-weight", type=float, default=0.0)
     parser.add_argument("--assignment-crossing-weight", type=float, default=0.0)
     parser.add_argument("--assignment-hold-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-reach-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-black-key-weight", type=float, default=0.0)
     parser.add_argument("--assignment-ik-residual-weight", type=float, default=0.0)
     parser.add_argument("--assignment-ik-max-residual-weight", type=float, default=0.0)
     parser.add_argument("--assignment-motion-weight", type=float, default=0.0)
@@ -132,10 +141,19 @@ def main() -> None:
         same_key_same_finger_bonus=float(args.same_key_same_finger_bonus),
         assignment_strategy=str(args.assignment_strategy),
         assignment_top_k=int(args.assignment_top_k),
+        assignment_beam_width=int(args.assignment_beam_width),
+        assignment_candidates_per_step=int(args.assignment_candidates_per_step),
+        assignment_future_horizon=int(args.assignment_future_horizon),
+        assignment_sequence_cost_discount=float(args.assignment_sequence_cost_discount),
+        assignment_unassigned_penalty=float(args.assignment_unassigned_penalty),
+        assignment_fail_if_unassigned=bool(args.assignment_fail_if_unassigned),
         assignment_distance_weight=float(args.assignment_distance_weight),
         assignment_hand_zone_weight=float(args.assignment_hand_zone_weight),
+        assignment_finger_zone_weight=float(args.assignment_finger_zone_weight),
         assignment_crossing_weight=float(args.assignment_crossing_weight),
         assignment_hold_weight=float(args.assignment_hold_weight),
+        assignment_reach_weight=float(args.assignment_reach_weight),
+        assignment_black_key_weight=float(args.assignment_black_key_weight),
         assignment_ik_residual_weight=float(args.assignment_ik_residual_weight),
         assignment_ik_max_residual_weight=float(args.assignment_ik_max_residual_weight),
         assignment_motion_weight=float(args.assignment_motion_weight),

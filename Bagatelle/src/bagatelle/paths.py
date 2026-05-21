@@ -14,6 +14,7 @@ def ensure_repo_paths() -> Path:
     repo = repo_root()
     for path in (
         repo / "Bagatelle" / "src",
+        repo / "Etude" / "src",
         repo / "Intermezzo" / "src",
         repo / "Variations" / "src",
         repo / "Variations",

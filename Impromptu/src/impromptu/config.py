@@ -59,6 +59,17 @@ class ImpromptuConfig:
     preserve_waypoint_press_qpos: bool = True
     waypoint_qpos_blend: float = 1.0
 
+    # Optional local dense-qpos refinement after anchor IK interpolation.
+    enable_trajectory_refinement: bool = False
+    trajectory_refinement_window_frames: int = 24
+    trajectory_refinement_max_nfev: int = 20
+    trajectory_refinement_fingertip_weight: float = 1.0
+    trajectory_refinement_velocity_weight: float = 0.005
+    trajectory_refinement_acceleration_weight: float = 0.002
+    trajectory_refinement_jerk_weight: float = 0.001
+    trajectory_refinement_neutral_weight: float = 0.001
+    trajectory_refinement_endpoint_weight: float = 0.05
+
     output_root: str = "/WAVE/datasets/ccoelho_lab-jlanders/Impromptu/runs"
 
     def to_dict(self) -> dict[str, object]:

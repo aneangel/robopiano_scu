@@ -37,8 +37,8 @@ def target_key_activation_reward(
     *_: dict[str, Any],
     **__: Any,
 ) -> float:
-    predicted = _resolve_state_array(state, "predicted_keys", required=True)
-    target = _resolve_state_array(state, "target_keys", required=True)
+    predicted = _resolve_first_state_array(state, ("predicted_keys", "key_state", "played_keys"), required=True)
+    target = _resolve_first_state_array(state, ("target_keys", "target_keys_now"), required=True)
     return float(np.sum(np.clip(predicted, 0.0, 1.0) * np.clip(target, 0.0, 1.0)))
 
 
@@ -47,8 +47,8 @@ def missed_key_penalty(
     *_: dict[str, Any],
     **__: Any,
 ) -> float:
-    predicted = _resolve_state_array(state, "predicted_keys", required=True)
-    target = _resolve_state_array(state, "target_keys", required=True)
+    predicted = _resolve_first_state_array(state, ("predicted_keys", "key_state", "played_keys"), required=True)
+    target = _resolve_first_state_array(state, ("target_keys", "target_keys_now"), required=True)
     misses = np.clip(target - predicted, 0.0, None)
     return float(np.sum(misses))
 
@@ -58,10 +58,25 @@ def wrong_key_penalty(
     *_: dict[str, Any],
     **__: Any,
 ) -> float:
-    predicted = _resolve_state_array(state, "predicted_keys", required=True)
-    target = _resolve_state_array(state, "target_keys", required=True)
+    predicted = _resolve_first_state_array(state, ("predicted_keys", "key_state", "played_keys"), required=True)
+    target = _resolve_first_state_array(state, ("target_keys", "target_keys_now"), required=True)
     wrong = np.clip(predicted - target, 0.0, None)
     return float(np.sum(wrong))
+
+
+def _resolve_first_state_array(
+    state: dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    required: bool = False,
+) -> np.ndarray:
+    for key in keys:
+        if key in state:
+            return _as_float_array(state[key])
+    if required:
+        tried = ", ".join(keys)
+        raise KeyError(f"Missing required state key; tried: {tried}")
+    return np.asarray(0.0, dtype=np.float32)
 
 
 def timing_error_penalty(

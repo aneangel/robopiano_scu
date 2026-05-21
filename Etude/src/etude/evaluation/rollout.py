@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from etude.controllers.base import TrajectoryFollower
+from etude.data.target_schema import metadata_at_timestep, standardize_controller_metadata
 from etude.robopianist.observation import extract_raw_key_state, extract_tracking_observation
 from etude.robopianist.state_mapping import StateMapping
 
@@ -40,7 +41,7 @@ def rollout_controller(
 ) -> dict[str, np.ndarray]:
     """Run a controller in a dm_control-style environment."""
     time_step = env.reset()
-    rollout_metadata = dict(metadata or {})
+    rollout_metadata = standardize_controller_metadata(metadata, q_ref=q_ref, qdot_ref=qdot_ref, horizon=q_ref.shape[0])
     controller.reset(q_ref, qdot_ref, metadata=rollout_metadata)
     trajectory_dt = float(rollout_metadata.get("dt", 0.005))
     env_dt = _resolve_env_dt(env, fallback_dt=trajectory_dt)
@@ -62,9 +63,7 @@ def rollout_controller(
     frames = []
     for step_idx, ref_t in enumerate(reference_indices):
         obs = extract_tracking_observation(time_step.observation, mapping, include_key_state=False)
-        for key in ("target_keys", "desired_fingertips", "fingertip_ref", "time_to_next_active_key"):
-            if key in rollout_metadata:
-                obs[key] = rollout_metadata[key]
+        obs.update(metadata_at_timestep(rollout_metadata, int(ref_t)))
         synthesized_fingertips = False
         if "fingertips" not in obs and "desired_fingertips" in rollout_metadata:
             desired_t = _metadata_timestep(rollout_metadata.get("desired_fingertips"), ref_t)

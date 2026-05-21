@@ -117,6 +117,73 @@ def _anchor_distances_for_frames(
     return (np.concatenate(values, axis=0) if values else np.zeros((0,), dtype=np.float32), indexed)
 
 
+def _dense_event_frames(dense_weights: np.ndarray, *, min_weight: float) -> dict[str, np.ndarray]:
+    weights = np.asarray(dense_weights, dtype=np.float32)
+    if weights.ndim != 2 or weights.size == 0:
+        empty = np.zeros((0,), dtype=np.int64)
+        return {"press": empty, "prepress": empty, "hold_end": empty, "release": empty}
+    press = weights >= float(min_weight)
+    press_frames = np.flatnonzero(np.any(press, axis=1)).astype(np.int64)
+    prepress: set[int] = set()
+    hold_end: set[int] = set()
+    release: set[int] = set()
+    total = int(weights.shape[0])
+    for finger in range(weights.shape[1]):
+        active = press[:, finger]
+        starts = np.flatnonzero(active & np.concatenate([[True], ~active[:-1]])).astype(np.int64)
+        ends = np.flatnonzero(active & np.concatenate([~active[1:], [True]])).astype(np.int64)
+        for start in starts:
+            if int(start) > 0:
+                prepress.add(int(start) - 1)
+        for end in ends:
+            hold_end.add(int(end))
+            if int(end) + 1 < total:
+                release.add(int(end) + 1)
+    return {
+        "press": press_frames,
+        "prepress": np.asarray(sorted(prepress), dtype=np.int64),
+        "hold_end": np.asarray(sorted(hold_end), dtype=np.int64),
+        "release": np.asarray(sorted(release), dtype=np.int64),
+    }
+
+
+def _anchor_clearance_and_proximity_counts(
+    *,
+    anchor_frames: np.ndarray,
+    anchor_tips: np.ndarray,
+    dense_targets: np.ndarray,
+    dense_weights: np.ndarray,
+    clearance_height: float,
+    xy_radius: float,
+) -> tuple[int, int, int]:
+    clearance_violations = 0
+    proximity_violations = 0
+    checked_rows = 0
+    if anchor_tips.ndim != 3 or dense_targets.ndim != 3 or dense_weights.ndim != 2:
+        return clearance_violations, proximity_violations, checked_rows
+    max_weight = float(np.nanmax(dense_weights)) if dense_weights.size else 0.0
+    press_threshold = max(0.9 * max_weight, 1e-8)
+    for row, frame in enumerate(np.asarray(anchor_frames, dtype=np.int64).reshape(-1)):
+        index = int(frame)
+        if row >= anchor_tips.shape[0] or index < 0 or index >= dense_targets.shape[0] or index >= dense_weights.shape[0]:
+            continue
+        finite = np.isfinite(dense_targets[index]).all(axis=1) & (dense_weights[index] > 0.0)
+        if not bool(finite.any()):
+            continue
+        checked_rows += 1
+        floor = float(np.max(dense_targets[index, finite, 2])) + float(clearance_height)
+        inactive = dense_weights[index] <= 0.0
+        low_inactive = inactive & (anchor_tips[row, :, 2] < floor)
+        clearance_violations += int(np.count_nonzero(low_inactive))
+        avoid_mask = inactive & (anchor_tips[row, :, 2] < floor)
+        target_xy = dense_targets[index, finite, :2]
+        if target_xy.size and float(xy_radius) > 0.0:
+            distances = np.linalg.norm(anchor_tips[row, :, None, :2] - target_xy[None, :, :], axis=2)
+            nearest = np.min(distances, axis=1)
+            proximity_violations += int(np.count_nonzero(avoid_mask & (nearest < float(xy_radius))))
+    return clearance_violations, proximity_violations, checked_rows
+
+
 def _sparse_distances_by_row_and_finger(
     *,
     assignments: np.ndarray,
@@ -283,6 +350,49 @@ def evaluate_trajectory_payload(payload: dict[str, np.ndarray]) -> dict[str, Any
         dense_weights=dense_weights,
         weight_min=1.0,
     )
+    max_dense_weight = float(np.nanmax(dense_weights)) if dense_weights.size else 0.0
+    press_weight_threshold = max(0.9 * max_dense_weight, 1.0) if max_dense_weight > 0.0 else 1.0
+    event_frames = _dense_event_frames(dense_weights, min_weight=press_weight_threshold)
+    press_anchor_distance_values, _ = _anchor_distances_for_frames(
+        frames=event_frames["press"],
+        anchor_frames=anchor_frames,
+        anchor_tips=anchor_tips,
+        dense_targets=dense_targets,
+        dense_weights=dense_weights,
+        weight_min=press_weight_threshold,
+    )
+    prepress_anchor_distance_values, _ = _anchor_distances_for_frames(
+        frames=event_frames["prepress"],
+        anchor_frames=anchor_frames,
+        anchor_tips=anchor_tips,
+        dense_targets=dense_targets,
+        dense_weights=dense_weights,
+        weight_min=0.0,
+    )
+    hold_end_anchor_distance_values, _ = _anchor_distances_for_frames(
+        frames=event_frames["hold_end"],
+        anchor_frames=anchor_frames,
+        anchor_tips=anchor_tips,
+        dense_targets=dense_targets,
+        dense_weights=dense_weights,
+        weight_min=press_weight_threshold,
+    )
+    release_anchor_distance_values, _ = _anchor_distances_for_frames(
+        frames=event_frames["release"],
+        anchor_frames=anchor_frames,
+        anchor_tips=anchor_tips,
+        dense_targets=dense_targets,
+        dense_weights=dense_weights,
+        weight_min=0.0,
+    )
+    clearance_violations, proximity_violations, clearance_rows = _anchor_clearance_and_proximity_counts(
+        anchor_frames=anchor_frames,
+        anchor_tips=anchor_tips,
+        dense_targets=dense_targets,
+        dense_weights=dense_weights,
+        clearance_height=_as_scalar_float(payload, "inactive_clearance_height", default=0.04),
+        xy_radius=_as_scalar_float(payload, "wrong_key_xy_radius", default=0.018),
+    )
 
     out: dict[str, Any] = {}
     out["num_target_frames"] = num_target_frames
@@ -333,6 +443,8 @@ def evaluate_trajectory_payload(payload: dict[str, np.ndarray]) -> dict[str, Any
     out.update(_summary(weighted_anchor_distance_values, "ik_anchor_error_weight_ge_1"))
     out["ik_anchor_success_rate_020m_weight_ge_1"] = _success_rate(weighted_anchor_distance_values, 0.02)
     out["ik_anchor_success_rate"] = float(np.mean(metrics[:, 0])) if metrics.size else 0.0
+    out["ik_anchor_failure_count"] = int(np.count_nonzero(metrics[:, 0] < 1.0)) if metrics.size else 0
+    out["ik_anchor_optimizer_failure_count"] = int(np.count_nonzero(metrics[:, 1] < 1.0)) if metrics.size else 0
     out["ik_anchor_nfev_mean"] = float(np.mean(metrics[:, 2])) if metrics.size else 0.0
     out["ik_anchor_nfev_p95"] = float(np.percentile(metrics[:, 2], 95)) if metrics.size else 0.0
     out["num_ik_anchors"] = int(anchor_frames.size)
@@ -341,6 +453,20 @@ def evaluate_trajectory_payload(payload: dict[str, np.ndarray]) -> dict[str, Any
     out["waypoint_has_exact_anchor_rate"] = float(np.mean(waypoint_anchor_matches)) if waypoint_anchor_matches.size else 0.0
     out["waypoint_missing_exact_anchor_count"] = int(np.count_nonzero(~waypoint_anchor_matches)) if waypoint_anchor_matches.size else num_waypoints
     out["num_ik_anchor_control_frames"] = int(anchor_frames_control.size)
+
+    out.update(_distance_summary_with_success(press_anchor_distance_values, "press_frame_anchor_error"))
+    out.update(_distance_summary_with_success(prepress_anchor_distance_values, "prepress_approach_anchor_error"))
+    out.update(_distance_summary_with_success(hold_end_anchor_distance_values, "hold_end_anchor_error"))
+    out.update(_distance_summary_with_success(release_anchor_distance_values, "release_anchor_error"))
+    out["press_frame_anchor_count"] = int(press_anchor_distance_values.size)
+    out["prepress_approach_anchor_count"] = int(prepress_anchor_distance_values.size)
+    out["hold_end_anchor_count"] = int(hold_end_anchor_distance_values.size)
+    out["release_anchor_count"] = int(release_anchor_distance_values.size)
+    out["inactive_clearance_violation_count"] = int(clearance_violations)
+    out["wrong_key_proximity_violation_count"] = int(proximity_violations)
+    out["clearance_proximity_anchor_rows_checked"] = int(clearance_rows)
+    out["inactive_clearance_violation_rate_per_checked_anchor"] = _safe_div(clearance_violations, clearance_rows)
+    out["wrong_key_proximity_violation_rate_per_checked_anchor"] = _safe_div(proximity_violations, clearance_rows)
 
     out["max_joint_step"] = float(np.max(joint_steps)) if joint_steps.size else 0.0
     out["mean_joint_step"] = float(np.mean(joint_steps)) if joint_steps.size else 0.0
@@ -356,6 +482,7 @@ def evaluate_trajectory_payload(payload: dict[str, np.ndarray]) -> dict[str, Any
     out["joint_jerk_max"] = float(np.max(joint_jerk_norm)) if joint_jerk_norm.size else 0.0
 
     # Placeholders preserve schema compatibility for future rollout-integrated evaluation.
+    out["online_metrics_status"] = "absent"
     out["online_metrics_available"] = False
     out.setdefault("missed_key_presses", None)
     out.setdefault("mispresses", None)

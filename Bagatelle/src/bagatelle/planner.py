@@ -13,7 +13,7 @@ from bagatelle.assignment import (
     generate_assignment_candidates,
 )
 from bagatelle.config import BagatelleConfig
-from bagatelle.kinematics import HAND_STATE_DIM, BagatelleKinematics, IKResult
+from bagatelle.kinematics import FINGER_ORDER, HAND_STATE_DIM, JOINT_ORDER, JOINT_INDEX_RANGES_BY_HAND, BagatelleKinematics, IKResult
 from bagatelle.paths import ensure_repo_paths
 
 ensure_repo_paths()
@@ -69,6 +69,23 @@ class BagatelleTrajectory:
         }
 
 
+@dataclass(frozen=True)
+class _SequenceBeamPlanState:
+    qpos: np.ndarray
+    fingertips: np.ndarray
+    dense_assignment: np.ndarray
+    cumulative_cost: float
+    waypoint_poses: tuple[np.ndarray, ...]
+    waypoint_fingertips: tuple[np.ndarray, ...]
+    assignment_rows: tuple[np.ndarray, ...]
+    assignment_cost_rows: tuple[np.ndarray, ...]
+    fingertip_target_rows: tuple[np.ndarray, ...]
+    unassigned_rows: tuple[np.ndarray, ...]
+    ik_metric_rows: tuple[np.ndarray, ...]
+    ik_results: tuple[IKResult, ...]
+    assignments: tuple[Any, ...]
+
+
 def _planner_config(config: BagatelleConfig) -> PlannerConfig:
     return PlannerConfig(
         control_timestep=float(config.control_timestep),
@@ -106,6 +123,221 @@ def _ik_metric_row(result: IKResult) -> np.ndarray:
     )
 
 
+def _unassigned_score(unassigned_count: int, config: BagatelleConfig) -> float:
+    if int(unassigned_count) <= 0:
+        return 0.0
+    if bool(config.assignment_fail_if_unassigned):
+        return float("inf")
+    return float(config.assignment_unassigned_penalty) * float(unassigned_count)
+
+
+def _assignment_candidate_diagnostic(
+    *,
+    waypoint_index: int,
+    candidate_rank: int,
+    assignment: Any,
+    assignment_cost: float,
+    crossing: float,
+    ik_result: IKResult,
+    motion: float,
+    final_score: float,
+    selected: bool,
+) -> dict[str, Any]:
+    return {
+        "waypoint_index": int(waypoint_index),
+        "candidate_rank": int(candidate_rank),
+        "assignment_signature": assignment.dense_key_by_finger().astype(int).tolist(),
+        "assignment_cost": float(assignment_cost),
+        "crossing_penalty": float(crossing),
+        "ik_residual": float(ik_result.residual_norm),
+        "ik_max_residual": float(ik_result.max_residual),
+        "ik_success": bool(ik_result.success),
+        "motion_cost": float(motion),
+        "final_score": float(final_score),
+        "selected": bool(selected),
+        "unassigned_keys": assignment.unassigned_keys.astype(int).tolist(),
+    }
+
+
+def _sequence_beam_score(
+    *,
+    candidate_base_cost: float,
+    assignment: Any,
+    ik_result: IKResult,
+    previous_qpos: np.ndarray,
+    config: BagatelleConfig,
+) -> tuple[float, float, float]:
+    motion = float(np.linalg.norm(ik_result.pose.astype(np.float32) - previous_qpos.astype(np.float32)))
+    crossing = assignment_crossing_penalty(
+        assignment.assigned_finger_indices,
+        assignment.assigned_keys,
+        config,
+    )
+    score = (
+        float(candidate_base_cost)
+        + float(config.assignment_crossing_weight) * float(crossing)
+        + float(config.assignment_ik_residual_weight) * float(ik_result.residual_norm)
+        + float(config.assignment_ik_max_residual_weight) * float(ik_result.max_residual)
+        + float(config.assignment_motion_weight) * float(motion)
+        + _unassigned_score(int(assignment.unassigned_keys.size), config)
+        + (0.0 if ik_result.success else float(config.assignment_ik_failure_penalty))
+    )
+    return float(score), float(crossing), float(motion)
+
+
+def _plan_sequence_beam(
+    *,
+    cfg: BagatelleConfig,
+    kin: Any,
+    active_key_rows: list[np.ndarray],
+    contact_target_rows: list[np.ndarray],
+    neutral_qpos: np.ndarray,
+    previous_qpos: np.ndarray,
+    previous_fingertips: np.ndarray,
+    previous_dense_assignment: np.ndarray,
+) -> tuple[
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    list[IKResult],
+    list[Any],
+    list[dict[str, Any]],
+]:
+    beam_width = max(int(cfg.assignment_beam_width), 1)
+    candidates_per_step = int(cfg.assignment_candidates_per_step or cfg.assignment_top_k)
+    candidates_per_step = max(candidates_per_step, 1)
+    press_target_rows = [kin.key_press_targets(active_keys) for active_keys in active_key_rows]
+    diagnostics: list[dict[str, Any]] = []
+    ik_cache: dict[tuple[int, bytes, tuple[int, ...]], IKResult] = {}
+    beam = [
+        _SequenceBeamPlanState(
+            qpos=previous_qpos.astype(np.float32),
+            fingertips=previous_fingertips.astype(np.float32),
+            dense_assignment=previous_dense_assignment.astype(np.int32),
+            cumulative_cost=0.0,
+            waypoint_poses=(),
+            waypoint_fingertips=(),
+            assignment_rows=(),
+            assignment_cost_rows=(),
+            fingertip_target_rows=(),
+            unassigned_rows=(),
+            ik_metric_rows=(),
+            ik_results=(),
+            assignments=(),
+        )
+    ]
+
+    for waypoint_index, active_keys in enumerate(active_key_rows):
+        expansions: list[tuple[float, int, _SequenceBeamPlanState, dict[str, Any]]] = []
+        for state_index, state in enumerate(beam):
+            candidates = generate_assignment_candidates(
+                active_keys,
+                state.fingertips,
+                contact_target_rows[waypoint_index],
+                cfg,
+                max_candidates=candidates_per_step,
+                previous_assignment=state.dense_assignment,
+            )
+            for candidate in candidates:
+                assignment = candidate.result
+                if assignment.count:
+                    assignment = replace(
+                        assignment,
+                        target_positions=press_target_rows[waypoint_index][
+                            assignment.assigned_key_positions
+                        ].astype(np.float32),
+                    )
+                cache_key = (
+                    waypoint_index,
+                    np.round(state.qpos.astype(np.float32), 5).tobytes(),
+                    tuple(assignment.dense_key_by_finger().astype(int).tolist()),
+                )
+                result = ik_cache.get(cache_key)
+                if result is None:
+                    result = kin.solve_press_pose(
+                        assignment,
+                        state.qpos,
+                        neutral_qpos=neutral_qpos,
+                        config=cfg,
+                    )
+                    ik_cache[cache_key] = result
+                local_score, crossing, motion = _sequence_beam_score(
+                    candidate_base_cost=float(candidate.base_cost),
+                    assignment=assignment,
+                    ik_result=result,
+                    previous_qpos=state.qpos,
+                    config=cfg,
+                )
+                if not np.isfinite(local_score):
+                    continue
+                cumulative = float(state.cumulative_cost + local_score)
+                scored_assignment = replace(
+                    assignment,
+                    strategy="sequence_beam",
+                    candidate_rank=int(candidate.rank),
+                    candidate_score=cumulative,
+                )
+                diagnostic = _assignment_candidate_diagnostic(
+                    waypoint_index=waypoint_index,
+                    candidate_rank=int(candidate.rank),
+                    assignment=scored_assignment,
+                    assignment_cost=float(candidate.base_cost),
+                    crossing=float(crossing),
+                    ik_result=result,
+                    motion=float(motion),
+                    final_score=cumulative,
+                    selected=False,
+                )
+                next_state = _SequenceBeamPlanState(
+                    qpos=result.pose.astype(np.float32),
+                    fingertips=result.fingertip_positions.astype(np.float32),
+                    dense_assignment=scored_assignment.dense_key_by_finger(),
+                    cumulative_cost=cumulative,
+                    waypoint_poses=state.waypoint_poses + (result.pose.astype(np.float32),),
+                    waypoint_fingertips=state.waypoint_fingertips + (result.fingertip_positions.astype(np.float32),),
+                    assignment_rows=state.assignment_rows + (scored_assignment.dense_key_by_finger(),),
+                    assignment_cost_rows=state.assignment_cost_rows + (scored_assignment.dense_cost_by_finger(),),
+                    fingertip_target_rows=state.fingertip_target_rows + (scored_assignment.dense_targets_by_finger(),),
+                    unassigned_rows=state.unassigned_rows + (scored_assignment.unassigned_keys.astype(np.int32),),
+                    ik_metric_rows=state.ik_metric_rows + (_ik_metric_row(result),),
+                    ik_results=state.ik_results + (result,),
+                    assignments=state.assignments + (scored_assignment,),
+                )
+                expansions.append((cumulative, state_index, next_state, diagnostic))
+        if not expansions:
+            raise RuntimeError("sequence_beam found no usable candidate path")
+        expansions.sort(
+            key=lambda item: (
+                float(item[0]),
+                int(item[1]),
+                tuple(item[2].dense_assignment.astype(int).tolist()),
+            )
+        )
+        selected_ids = {id(item[2]) for item in expansions[:beam_width]}
+        if waypoint_index < 500:
+            for _, _, state, diagnostic in expansions:
+                diagnostics.append({**diagnostic, "selected": id(state) in selected_ids})
+        beam = [state for _, _, state, _ in expansions[:beam_width]]
+
+    best = min(beam, key=lambda state: (float(state.cumulative_cost), tuple(state.dense_assignment.astype(int).tolist())))
+    return (
+        list(best.waypoint_poses),
+        list(best.waypoint_fingertips),
+        list(best.assignment_rows),
+        list(best.assignment_cost_rows),
+        list(best.fingertip_target_rows),
+        list(best.unassigned_rows),
+        list(best.ik_metric_rows),
+        list(best.ik_results),
+        list(best.assignments),
+        diagnostics,
+    )
+
+
 def _metadata_from_results(
     *,
     config: BagatelleConfig,
@@ -114,17 +346,57 @@ def _metadata_from_results(
     ik_results: list[IKResult],
     assignments: list[Any],
     kinematics: Any,
+    candidate_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     max_residuals = np.asarray([result.max_residual for result in ik_results], dtype=np.float32)
     unassigned_total = int(sum(int(result.unassigned_keys.size) for result in ik_results))
+    site_names = list(getattr(kinematics, "fingertip_site_names", ()))
+    joint_names = list(getattr(kinematics, "joint_names", ()))
+    order_metadata = getattr(kinematics, "order_metadata", {}) or {}
     metadata: dict[str, Any] = {
         "planner": "bagatelle_ot_ik_previous_pose",
         "config": config.to_dict(),
         "target_keys_shape": list(target_keys.shape),
         "num_waypoints": int(waypoint_frames.size),
         "waypoint_frames": waypoint_frames.astype(int).tolist(),
-        "finger_order": "left_hand_sites_then_right_hand_sites",
-        "joint_order": "right_hand_joints_then_left_hand_joints",
+        "finger_order": str(order_metadata.get("finger_order", FINGER_ORDER)),
+        "joint_order": str(order_metadata.get("joint_order", JOINT_ORDER)),
+        "fingertip_site_names": list(order_metadata.get("fingertip_site_names", site_names)),
+        "joint_names": list(order_metadata.get("joint_names", joint_names)),
+        "finger_hands": list(order_metadata.get("finger_hands", [])),
+        "finger_names": list(order_metadata.get("finger_names", [])),
+        "assignment_finger_to_site": list(order_metadata.get("assignment_finger_to_site", [
+            {"finger_index": index, "site_name": name}
+            for index, name in enumerate(site_names)
+        ])),
+        "joint_index_ranges_by_hand": dict(order_metadata.get("joint_index_ranges_by_hand", JOINT_INDEX_RANGES_BY_HAND)),
+        "key_target_mode": "press",
+        "key_target_parameters": {
+            "front_offset": float(config.key_target_front_offset),
+            "top_offset": float(config.key_target_top_offset),
+            "press_depth": float(config.key_press_depth),
+        },
+        "ik_solver": {
+            "max_nfev": int(config.ik_max_nfev),
+            "ftol": float(config.ik_ftol),
+            "xtol": float(config.ik_xtol),
+            "gtol": float(config.ik_gtol),
+            "residual_success_threshold": float(config.residual_success_threshold),
+            "weights": {
+                "fingertip": float(config.ik_fingertip_weight),
+                "key_front": float(config.ik_key_front_weight),
+                "key_width": float(config.ik_key_width_weight),
+                "key_height": float(config.ik_key_height_weight),
+                "smoothness": float(config.ik_smoothness_weight),
+                "neutral": float(config.ik_neutral_weight),
+                "inactive_fingertip_clearance": float(config.ik_inactive_fingertip_clearance_weight),
+                "wrong_key_xy_avoidance": float(config.ik_wrong_key_xy_avoidance_weight),
+            },
+        },
+        "per_waypoint_residual_histograms": [
+            np.histogram(result.assigned_distances, bins=[0.0, 0.005, 0.01, 0.02, 0.05, np.inf])[0].astype(int).tolist()
+            for result in ik_results[:500]
+        ],
         "right_forearm_ty_index": int(RIGHT_FOREARM_TY_INDEX),
         "left_forearm_ty_index": int(LEFT_FOREARM_TY_INDEX),
         "ik_metric_columns": list(IK_METRIC_COLUMNS),
@@ -139,6 +411,17 @@ def _metadata_from_results(
         "waypoint_results": [result.to_dict() for result in ik_results[:500]],
         "assignment_strategy": str(config.assignment_strategy),
         "assignment_top_k": int(config.assignment_top_k),
+        "assignment_beam_width": int(config.assignment_beam_width),
+        "assignment_candidates_per_step": int(config.assignment_candidates_per_step or config.assignment_top_k),
+        "assignment_candidate_diagnostics_schema": {
+            "waypoint_index": "0-based waypoint index",
+            "assignment_signature": "dense key-by-finger vector, -1 for idle fingers",
+            "assignment_cost": "candidate linear assignment cost before IK terms",
+            "ik_residual": "L2 norm of assigned fingertip residuals",
+            "motion_cost": "L2 qpos motion from prior beam state",
+            "final_score": "cumulative beam score after this candidate",
+            "selected": "candidate survived this waypoint's beam pruning",
+        },
         "assignment_cost_weights": {
             "distance": float(config.assignment_distance_weight),
             "hand_zone": float(config.assignment_hand_zone_weight),
@@ -169,6 +452,8 @@ def _metadata_from_results(
     if candidate_scores:
         score_array = np.asarray(candidate_scores, dtype=np.float32)
         metadata["assignment_candidate_score_mean"] = float(np.mean(score_array))
+    if candidate_diagnostics is not None:
+        metadata["assignment_candidate_diagnostics"] = candidate_diagnostics[:500]
     return metadata
 
 
@@ -216,10 +501,34 @@ def plan_target_keys(
         ik_metric_rows: list[np.ndarray] = []
         ik_results: list[IKResult] = []
         final_assignments: list[Any] = []
+        candidate_diagnostics: list[dict[str, Any]] = []
 
         strategy = str(getattr(cfg, "assignment_strategy", "legacy_previous_pose"))
 
-        for waypoint_index, _target_row in enumerate(waypoint_target_keys):
+        if strategy == "sequence_beam":
+            (
+                waypoint_poses,
+                waypoint_fingertips,
+                assignment_rows,
+                assignment_cost_rows,
+                fingertip_target_rows,
+                unassigned_rows,
+                ik_metric_rows,
+                ik_results,
+                final_assignments,
+                candidate_diagnostics,
+            ) = _plan_sequence_beam(
+                cfg=cfg,
+                kin=kin,
+                active_key_rows=active_key_rows,
+                contact_target_rows=contact_target_rows,
+                neutral_qpos=neutral_qpos,
+                previous_qpos=previous_qpos,
+                previous_fingertips=previous_fingertips,
+                previous_dense_assignment=previous_dense_assignment,
+            )
+
+        for waypoint_index, _target_row in enumerate([] if strategy == "sequence_beam" else waypoint_target_keys):
             active_keys = active_key_rows[waypoint_index]
             contact_targets = contact_target_rows[waypoint_index]
             cost_bias = None if sequence_cost_biases is None else sequence_cost_biases[waypoint_index]
@@ -259,20 +568,27 @@ def plan_target_keys(
                         neutral_qpos=neutral_qpos,
                         config=cfg,
                     )
-                    motion = np.linalg.norm(result.pose.astype(np.float32) - previous_qpos.astype(np.float32))
-                    crossing = assignment_crossing_penalty(
-                        assignment.assigned_finger_indices,
-                        assignment.assigned_keys,
-                        cfg,
+                    score, crossing, motion = _sequence_beam_score(
+                        candidate_base_cost=float(candidate.base_cost),
+                        assignment=assignment,
+                        ik_result=result,
+                        previous_qpos=previous_qpos,
+                        config=cfg,
                     )
-                    score = (
-                        float(candidate.base_cost)
-                        + float(cfg.assignment_crossing_weight) * float(crossing)
-                        + float(cfg.assignment_ik_residual_weight) * float(result.residual_norm)
-                        + float(cfg.assignment_ik_max_residual_weight) * float(result.max_residual)
-                        + float(cfg.assignment_motion_weight) * float(motion)
-                        + (0.0 if result.success else float(cfg.assignment_ik_failure_penalty))
-                    )
+                    if waypoint_index < 500:
+                        candidate_diagnostics.append(
+                            _assignment_candidate_diagnostic(
+                                waypoint_index=waypoint_index,
+                                candidate_rank=int(candidate.rank),
+                                assignment=assignment,
+                                assignment_cost=float(candidate.base_cost),
+                                crossing=float(crossing),
+                                ik_result=result,
+                                motion=float(motion),
+                                final_score=float(score),
+                                selected=False,
+                            )
+                        )
                     if score < best_score:
                         best_score = float(score)
                         best_assignment = replace(assignment, candidate_rank=int(candidate.rank), candidate_score=float(score))
@@ -281,6 +597,14 @@ def plan_target_keys(
                     raise RuntimeError("generate_assignment_candidates returned no usable candidate")
                 assignment = best_assignment
                 result = best_result
+                if waypoint_index < 500 and candidate_diagnostics:
+                    for diagnostic in reversed(candidate_diagnostics):
+                        if diagnostic["waypoint_index"] != waypoint_index:
+                            break
+                        diagnostic["selected"] = (
+                            int(diagnostic["candidate_rank"]) == int(assignment.candidate_rank)
+                            and diagnostic["assignment_signature"] == assignment.dense_key_by_finger().astype(int).tolist()
+                        )
             else:
                 if cost_bias is not None:
                     assignment = assign_fingers_previous_pose(
@@ -369,6 +693,7 @@ def plan_target_keys(
             ik_results=ik_results,
             assignments=final_assignments,
             kinematics=kin,
+            candidate_diagnostics=candidate_diagnostics,
         )
         metadata["assignment_mode"] = (
             f"sequence_{cfg.sequence_model_type}"
