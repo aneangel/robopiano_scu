@@ -1,0 +1,49 @@
+includes:
+  - ../controller/fingertip_phase_residual.yaml
+  - ../corruption/none.yaml
+  - ../features/fingertip_phase.yaml
+
+experiment:
+  name: bagatelle_keypress_temporal_refine
+  controller_family: fingertip_residual
+  evaluation_mode: rollout_eval
+  resource_tier: tier2_gpu_train
+
+training:
+  epochs: 5
+  lr: 1.0e-5
+  weight_decay: 1.0e-5
+  device: cuda
+  eval_every: 1
+
+reward:
+  target_key_activation: 2.0
+  missed_key: -4.0
+  wrong_key: -6.0
+  timing_error: -2.0
+  release_error: -1.0
+  fingertip_tracking: -0.5
+  action_smoothness: -0.05
+  residual_l2: -0.05
+
+refinement:
+  stage: keypress_temporal
+  selection_metric: piano/event_f1
+  selection_mode: max
+  tie_break_metrics:
+    - piano/missed_events
+    - piano/false_events
+    - piano/timing_abs_error_mean_s
+    - fingertip/active_l2_mean
+
+execution:
+  kind: bagatelle_refine_keypress_temporal
+  dry_run_support: true
+  allow_execute: true
+  requires_rollout: true
+  requires_gpu: true
+  local_batch_script: local_batch/run_etude_rollout_eval.echo
+
+output:
+  root: runs
+  subdir: refine/bagatelle_keypress_temporal
