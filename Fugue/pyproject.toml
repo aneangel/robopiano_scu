@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fugue-action-reconstruction"
+version = "0.1.0"
+description = "Fugue: same-song RP1M action reconstruction for RoboPianist"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jack Landers"}, {name = "OpenAI Codex"}]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "PyYAML>=6.0",
+  "torch>=2.2",
+  "zarr>=2.16,<3",
+  "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+full = [
+  "mujoco>=3.1",
+  "dm-control>=1.0",
+  "imageio>=2.34",
+  "imageio-ffmpeg>=0.4",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["src", "scripts", ".."]
+
+[tool.ruff]
+line-length = 100

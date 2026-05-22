@@ -1,0 +1,47 @@
+wandb:
+  enabled: true
+  project: robopianist
+  entity: tnguyen31-santa-clara-university
+  mode: online
+  group: Fugue
+  tags: [fugue, model-b, history]
+
+dataset:
+  song_key: RoboPianist-debug-TwinkleTwinkleLittleStar-v0_0
+  train_frac: 0.70
+  val_frac: 0.15
+  test_frac: 0.15
+  split_seed: 7
+  dt: 0.05
+
+sample:
+  feature_mode: history
+  history: 8
+  goal_horizon: 16
+  chunk_horizon: 1
+  delta: 0
+  include_qpos: true
+  include_qvel: true
+  include_action_history: true
+  include_goals: true
+  include_fingertips: false
+  include_future_qvel: false
+  press_window: 2
+
+model:
+  type: mlp
+  hidden_dim: 256
+  hidden_layers: 3
+  dropout: 0.05
+  layer_norm: true
+
+training:
+  batch_size: 2048
+  epochs: 100
+  patience: 15
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  press_weight_scale: 2.0
+  smoothness_weight: 0.0
+  num_workers: 0
