@@ -1,0 +1,7 @@
+recursive-include models/hands/third_party *
+recursive-include soundfonts *
+recursive-include music/data *
+include py.typed
+include README.md
+include LICENSE
+include CITATION.cff

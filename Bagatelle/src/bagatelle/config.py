@@ -20,6 +20,12 @@ class BagatelleConfig:
     ik_neutral_weight: float = 0.01
     ik_inactive_fingertip_clearance_weight: float = 0.0
     ik_inactive_fingertip_clearance: float = 0.02
+    # `legacy` preserves the original IK objective. `avoid_mispresses`
+    # lifts idle fingertips when they are close enough to non-target keys to
+    # risk a wrong-key contact.
+    ik_unassigned_fingertip_strategy: str = "legacy"
+    ik_unassigned_fingertip_avoidance_weight: float = 0.5
+    ik_unassigned_fingertip_avoidance_radius: float = 0.03
     ik_wrong_key_xy_avoidance_weight: float = 0.0
     ik_wrong_key_xy_avoidance_radius: float = 0.025
     ik_max_nfev: int = 120

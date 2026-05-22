@@ -179,6 +179,12 @@ def _train_one(
             if sample_config.feature_mode == "inverse"
             else None
         ),
+        "planner_conditioning_note": (
+            "This run trains one-step inverse dynamics from current hand state to a target hand state. "
+            "Deployable rollout must supply the current state from the simulator and target states from a planner."
+            if sample_config.feature_mode == "planner_next"
+            else None
+        ),
     }
     save_json(output_root / "run_config.json", {k: v for k, v in checkpoint_payload.items() if k != "normalization"})
     wandb_run = WandbRun(

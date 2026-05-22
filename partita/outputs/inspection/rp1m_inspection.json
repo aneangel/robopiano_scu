@@ -1,0 +1,308 @@
+{
+  "first_song_groups": [
+    "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_0",
+    "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_500",
+    "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_0",
+    "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_500",
+    "RoboPianist-GP-AgnewRoy2PianoPieces-v0_0"
+  ],
+  "inspected_songs": [
+    {
+      "arrays": {
+        "actions": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            39
+          ]
+        },
+        "goals": {
+          "dtype": "bool",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        },
+        "hand_fingertips": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            30
+          ]
+        },
+        "hand_joints": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            46
+          ]
+        },
+        "piano_states": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        }
+      },
+      "song_name": "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_0"
+    },
+    {
+      "arrays": {
+        "actions": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            39
+          ]
+        },
+        "goals": {
+          "dtype": "bool",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        },
+        "hand_fingertips": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            30
+          ]
+        },
+        "hand_joints": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            46
+          ]
+        },
+        "piano_states": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        }
+      },
+      "song_name": "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_500"
+    },
+    {
+      "arrays": {
+        "actions": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            39
+          ]
+        },
+        "goals": {
+          "dtype": "bool",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        },
+        "hand_fingertips": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            30
+          ]
+        },
+        "hand_joints": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            46
+          ]
+        },
+        "piano_states": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        }
+      },
+      "song_name": "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_0"
+    },
+    {
+      "arrays": {
+        "actions": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            39
+          ]
+        },
+        "goals": {
+          "dtype": "bool",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        },
+        "hand_fingertips": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            30
+          ]
+        },
+        "hand_joints": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            46
+          ]
+        },
+        "piano_states": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        }
+      },
+      "song_name": "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_500"
+    },
+    {
+      "arrays": {
+        "actions": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            39
+          ]
+        },
+        "goals": {
+          "dtype": "bool",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        },
+        "hand_fingertips": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            30
+          ]
+        },
+        "hand_joints": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            46
+          ]
+        },
+        "piano_states": {
+          "dtype": "float32",
+          "shape": [
+            500,
+            550,
+            89
+          ]
+        }
+      },
+      "song_name": "RoboPianist-GP-AgnewRoy2PianoPieces-v0_0"
+    }
+  ],
+  "num_song_groups": 2087,
+  "preferred_matches": [
+    {
+      "matched_term": "FrenchSuiteNo5Sarabande",
+      "priority": 0,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0"
+    },
+    {
+      "matched_term": "FrenchSuiteNo5Sarabande",
+      "priority": 0,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_500"
+    },
+    {
+      "matched_term": "FrenchSuiteNo5",
+      "priority": 1,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Gavotte-v0_0"
+    },
+    {
+      "matched_term": "FrenchSuiteNo5",
+      "priority": 1,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Gavotte-v0_500"
+    },
+    {
+      "matched_term": "PianoSonataNo232NdMov",
+      "priority": 3,
+      "song_name": "RoboPianist-repertoire-150-PianoSonataNo232NdMov-v0_0"
+    },
+    {
+      "matched_term": "FrenchSuiteNo1Allemande",
+      "priority": 4,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0_0"
+    },
+    {
+      "matched_term": "FrenchSuiteNo1Allemande",
+      "priority": 4,
+      "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0_500"
+    },
+    {
+      "matched_term": "PianoSonataD8451StMov",
+      "priority": 5,
+      "song_name": "RoboPianist-repertoire-150-PianoSonataD8451StMov-v0_0"
+    },
+    {
+      "matched_term": "PianoSonataD8451StMov",
+      "priority": 5,
+      "song_name": "RoboPianist-repertoire-150-PianoSonataD8451StMov-v0_1000"
+    },
+    {
+      "matched_term": "PianoSonataD8451StMov",
+      "priority": 5,
+      "song_name": "RoboPianist-repertoire-150-PianoSonataD8451StMov-v0_500"
+    },
+    {
+      "matched_term": "PartitaNo26",
+      "priority": 6,
+      "song_name": "RoboPianist-repertoire-150-PartitaNo26-v0_0"
+    },
+    {
+      "matched_term": "GolliwoggsCakewalk",
+      "priority": 7,
+      "song_name": "RoboPianist-repertoire-150-GolliwoggsCakewalk-v0_0"
+    }
+  ],
+  "root_array_keys": [],
+  "root_group_keys": [
+    "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_0",
+    "RoboPianist-GP-AdamsAEmmettTheBellsOfStMarys-v0_500",
+    "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_0",
+    "RoboPianist-GP-AdlerVincentGrandeMarcheOp24-v0_500",
+    "RoboPianist-GP-AgnewRoy2PianoPieces-v0_0"
+  ],
+  "rp1m_root": "/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr"
+}

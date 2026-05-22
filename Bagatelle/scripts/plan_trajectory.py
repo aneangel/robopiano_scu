@@ -48,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-key-height-weight", type=float, default=1.0)
     parser.add_argument("--ik-smoothness-weight", type=float, default=0.05)
     parser.add_argument("--ik-neutral-weight", type=float, default=0.01)
+    parser.add_argument(
+        "--ik-unassigned-fingertip-strategy",
+        default="legacy",
+        choices=("legacy", "avoid_mispresses"),
+        help="How IK treats fingertips that are not assigned to active keys.",
+    )
+    parser.add_argument("--ik-unassigned-fingertip-avoidance-weight", type=float, default=0.5)
+    parser.add_argument("--ik-unassigned-fingertip-avoidance-radius", type=float, default=0.03)
     parser.add_argument("--ik-max-nfev", type=int, default=120)
     parser.add_argument("--residual-success-threshold", type=float, default=0.02)
     parser.add_argument("--key-press-depth", type=float, default=0.008)
@@ -123,6 +131,9 @@ def main() -> None:
         ik_key_height_weight=float(args.ik_key_height_weight),
         ik_smoothness_weight=float(args.ik_smoothness_weight),
         ik_neutral_weight=float(args.ik_neutral_weight),
+        ik_unassigned_fingertip_strategy=str(args.ik_unassigned_fingertip_strategy),
+        ik_unassigned_fingertip_avoidance_weight=float(args.ik_unassigned_fingertip_avoidance_weight),
+        ik_unassigned_fingertip_avoidance_radius=float(args.ik_unassigned_fingertip_avoidance_radius),
         ik_max_nfev=int(args.ik_max_nfev),
         residual_success_threshold=float(args.residual_success_threshold),
         key_press_depth=float(args.key_press_depth),

@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-window-last-s", type=float, default=None)
     parser.add_argument("--active-window-preroll-s", type=float, default=0.5)
     parser.add_argument("--active-window-postroll-s", type=float, default=0.25)
+    parser.add_argument(
+        "--disable-gravity",
+        action="store_true",
+        help="Set MuJoCo gravity to zero before dense direct-pose playback.",
+    )
     return parser
 
 
@@ -145,6 +150,7 @@ def render_dense_playback(
     active_window_last_s: float | None = None,
     active_window_preroll_s: float = 0.5,
     active_window_postroll_s: float = 0.25,
+    disable_gravity: bool = False,
 ) -> dict[str, Any]:
     npz_path = Path(trajectory_npz).expanduser().resolve()
     out_dir = Path(output_dir).expanduser().resolve() if output_dir else npz_path.parent / "render_200fps"
@@ -199,11 +205,19 @@ def render_dense_playback(
     played_roll: list[np.ndarray] = []
     frames: list[np.ndarray] = []
     render_error = None
+    gravity_error = None
     terminated = False
     restored_count = 0
     try:
         env.reset()
         task, physics, piano = _locate_task_physics_piano(env)
+        if bool(disable_gravity):
+            try:
+                physics.model.opt.gravity[:] = 0.0
+                if hasattr(physics, "forward"):
+                    physics.forward()
+            except Exception as exc:
+                gravity_error = str(exc)
         action_spec = env.action_spec()
         zero_action = np.zeros(action_spec.shape, dtype=action_spec.dtype)
         for hand_state in hand_states:
@@ -312,6 +326,9 @@ def render_dense_playback(
         "video_format": video_format,
         "video_audio_warning": video_audio_warning,
         "render_error": render_error,
+        "disable_gravity": bool(disable_gravity),
+        "gravity_error": gravity_error,
+        "attraction_forces": "none_in_direct_hand_state_playback",
         "rendered_frames": int(len(frames)),
         "terminated": bool(terminated),
         "restored_hand_joint_count": int(restored_count),
@@ -344,6 +361,7 @@ def main() -> None:
         active_window_last_s=args.active_window_last_s,
         active_window_preroll_s=float(args.active_window_preroll_s),
         active_window_postroll_s=float(args.active_window_postroll_s),
+        disable_gravity=bool(args.disable_gravity),
     )
     print(f"Wrote Impromptu dense playback render: {summary.get('video_path')}")
     print(

@@ -24,6 +24,7 @@ JOINT_INDEX_RANGES_BY_HAND = {
 }
 FINGER_HAND_LABELS = ("left", "left", "left", "left", "left", "right", "right", "right", "right", "right")
 FINGER_NAMES = ("thumb", "index", "middle", "ring", "little", "thumb", "index", "middle", "ring", "little")
+UNASSIGNED_FINGERTIP_STRATEGIES = ("legacy", "avoid_mispresses")
 
 
 def _model_element_name(element: Any) -> str:
@@ -286,6 +287,24 @@ class BagatelleKinematics:
         depth = self.config.key_press_depth if press_depth is None else float(press_depth)
         return self._key_targets(keys, press_depth=float(depth))
 
+    @staticmethod
+    def inactive_wrong_key_clearance_residual(
+        inactive_fingertips: np.ndarray,
+        wrong_key_targets: np.ndarray,
+        *,
+        clearance_z: float,
+        radius: float,
+    ) -> np.ndarray:
+        fingertips = np.asarray(inactive_fingertips, dtype=np.float32)
+        targets = np.asarray(wrong_key_targets, dtype=np.float32)
+        if fingertips.size == 0 or targets.size == 0:
+            return np.zeros((0,), dtype=np.float64)
+        radius_value = max(float(radius), 1e-6)
+        xy_distance = np.linalg.norm(fingertips[:, None, :2] - targets[None, :, :2], axis=2)
+        proximity = np.maximum(radius_value - xy_distance, 0.0) / radius_value
+        vertical_deficit = np.maximum(float(clearance_z) - fingertips[:, 2], 0.0)
+        return (proximity * vertical_deficit[:, None]).reshape(-1).astype(np.float64)
+
     def solve_press_pose(
         self,
         assignments: FingerAssignmentResult,
@@ -320,16 +339,27 @@ class BagatelleKinematics:
         )
         inactive_clearance_weight = float(getattr(cfg, "ik_inactive_fingertip_clearance_weight", 0.0))
         inactive_clearance = float(getattr(cfg, "ik_inactive_fingertip_clearance", 0.02))
+        unassigned_strategy = str(getattr(cfg, "ik_unassigned_fingertip_strategy", "legacy"))
+        if unassigned_strategy not in UNASSIGNED_FINGERTIP_STRATEGIES:
+            raise ValueError(
+                "ik_unassigned_fingertip_strategy must be one of "
+                f"{UNASSIGNED_FINGERTIP_STRATEGIES}, got {unassigned_strategy!r}"
+            )
+        inactive_avoidance_weight = float(getattr(cfg, "ik_unassigned_fingertip_avoidance_weight", 0.5))
+        inactive_avoidance_radius = float(getattr(cfg, "ik_unassigned_fingertip_avoidance_radius", 0.03))
         wrong_key_weight = float(getattr(cfg, "ik_wrong_key_xy_avoidance_weight", 0.0))
         wrong_key_radius = max(float(getattr(cfg, "ik_wrong_key_xy_avoidance_radius", 0.025)), 1e-6)
         inactive_indices = np.setdiff1d(np.arange(NUM_FINGERS, dtype=np.int64), finger_indices, assume_unique=False)
         clearance_z = float(np.max(target_positions[:, 2]) + inactive_clearance) if target_positions.size else 0.0
         wrong_key_xy = np.zeros((0, 2), dtype=np.float32)
-        if wrong_key_weight > 0.0:
+        wrong_key_targets = np.zeros((0, 3), dtype=np.float32)
+        if wrong_key_weight > 0.0 or unassigned_strategy == "avoid_mispresses":
             all_keys = np.arange(int(self.piano.n_keys), dtype=np.int32)
             assigned_key_set = set(int(key) for key in assignments.assigned_keys.tolist())
             wrong_keys = np.asarray([int(key) for key in all_keys if int(key) not in assigned_key_set], dtype=np.int32)
-            wrong_key_xy = self.key_contact_targets(wrong_keys)[:, :2] if wrong_keys.size else wrong_key_xy
+            if wrong_keys.size:
+                wrong_key_targets = self.key_contact_targets(wrong_keys)
+                wrong_key_xy = wrong_key_targets[:, :2]
 
         def residual(values: np.ndarray) -> np.ndarray:
             q = self.clip_qpos(values)
@@ -343,6 +373,19 @@ class BagatelleKinematics:
             if inactive_clearance_weight > 0.0 and inactive_indices.size:
                 clearance_error = np.maximum(clearance_z - fingertips[inactive_indices, 2], 0.0)
                 parts.append(clearance_error.reshape(-1) * inactive_clearance_weight)
+            if (
+                unassigned_strategy == "avoid_mispresses"
+                and inactive_avoidance_weight > 0.0
+                and inactive_indices.size
+                and wrong_key_targets.size
+            ):
+                inactive_error = self.inactive_wrong_key_clearance_residual(
+                    fingertips[inactive_indices],
+                    wrong_key_targets,
+                    clearance_z=clearance_z,
+                    radius=inactive_avoidance_radius,
+                )
+                parts.append(inactive_error * inactive_avoidance_weight)
             if wrong_key_weight > 0.0 and wrong_key_xy.size:
                 assigned_xy = fingertips[finger_indices, :2]
                 xy_distance = np.linalg.norm(assigned_xy[:, None, :] - wrong_key_xy[None, :, :], axis=2)

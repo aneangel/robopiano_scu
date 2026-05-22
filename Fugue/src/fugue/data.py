@@ -35,6 +35,7 @@ ARRAY_NAMES = (
 class SampleConfig:
     feature_mode: str = "stateless"
     history: int = 1
+    lookahead: int = 1
     goal_horizon: int = 1
     chunk_horizon: int = 1
     delta: int = 0
@@ -56,16 +57,20 @@ class SampleConfig:
         return asdict(self)
 
     def validate(self) -> None:
-        if self.feature_mode not in {"stateless", "history", "inverse", "sequence"}:
+        if self.feature_mode not in {"stateless", "history", "inverse", "sequence", "planner_next"}:
             raise ValueError(f"Unsupported feature_mode: {self.feature_mode}")
         if self.history < 1:
             raise ValueError("history must be >= 1")
+        if self.lookahead < 1:
+            raise ValueError("lookahead must be >= 1")
         if self.goal_horizon < 1:
             raise ValueError("goal_horizon must be >= 1")
         if self.chunk_horizon < 1:
             raise ValueError("chunk_horizon must be >= 1")
         if self.press_window < 0:
             raise ValueError("press_window must be >= 0")
+        if self.feature_mode == "planner_next" and not self.include_qpos:
+            raise ValueError("planner_next requires include_qpos=true")
 
     def feature_dim(
         self,
@@ -99,6 +104,16 @@ class SampleConfig:
             if self.include_goals:
                 token_dim += goal_dim
             return token_dim
+        if self.feature_mode == "planner_next":
+            target_horizon = int(self.goal_horizon)
+            dim = current_dim + 2 * q_dim * target_horizon
+            if self.include_future_qvel:
+                dim += q_dim * target_horizon
+            if self.include_action_history:
+                dim += action_dim * self.history
+            if self.include_goals:
+                dim += goal_dim * self.goal_horizon
+            return dim
         if self.feature_mode == "inverse":
             dim = current_dim + q_dim * self.goal_horizon
             if self.include_future_qvel:
@@ -531,6 +546,8 @@ def valid_timesteps(length: int, config: SampleConfig) -> range:
         start = max(start, int(config.history) - 1)
     start = max(start, -int(config.delta))
     stop = int(length) - int(config.delta) - int(config.chunk_horizon) + 1
+    if config.feature_mode == "planner_next":
+        stop = min(stop, int(length) - int(config.lookahead) - int(config.goal_horizon) + 1)
     stop = min(stop, int(length))
     if stop <= start:
         return range(0, 0)
@@ -559,11 +576,99 @@ def build_feature_vector(episode: dict[str, np.ndarray | None], *, t: int, confi
             parts.append(_window(episode["qvel"], start=t + 1, length=config.goal_horizon).reshape(-1))
         if config.include_goals:
             parts.append(_window(episode["goals"], start=t, length=config.goal_horizon).reshape(-1))
+    elif config.feature_mode == "planner_next":
+        _append_current(parts, episode, t=t, config=config)
+        target_q = _window(episode["q"], start=int(t) + int(config.lookahead), length=config.goal_horizon)
+        current_q = np.asarray(episode["q"][t], dtype=np.float32).reshape(-1)
+        parts.append(target_q.reshape(-1))
+        parts.append((target_q - current_q.reshape(1, -1)).astype(np.float32).reshape(-1))
+        if config.include_future_qvel:
+            parts.append(
+                _window(episode["qvel"], start=int(t) + int(config.lookahead), length=config.goal_horizon).reshape(-1)
+            )
+        if config.include_action_history:
+            parts.append(_previous_action_history(episode["actions"], t=t, history=config.history))
+        if config.include_goals:
+            parts.append(_window(episode["goals"], start=t, length=config.goal_horizon).reshape(-1))
     elif config.feature_mode == "sequence":
         return _sequence_feature_tokens(episode, t=t, config=config)
     else:
         raise ValueError(f"Unsupported feature_mode: {config.feature_mode}")
     return np.concatenate([np.asarray(part, dtype=np.float32).reshape(-1) for part in parts]).astype(np.float32)
+
+
+def build_planner_next_feature(
+    *,
+    current_q_norm: np.ndarray,
+    current_qvel_norm: np.ndarray | None,
+    target_q_norm: np.ndarray,
+    config: SampleConfig,
+    target_qvel_norm: np.ndarray | None = None,
+    action_history_norm: np.ndarray | None = None,
+    goals_norm: np.ndarray | None = None,
+    current_fingertips_norm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build deployable planner-next features from normalized simulator/planner arrays.
+
+    ``target_q_norm`` is a future hand-state trajectory with shape
+    ``[goal_horizon, q_dim]``. A single ``[q_dim]`` vector is accepted only
+    when ``goal_horizon == 1``.
+    """
+    config.validate()
+    if config.feature_mode != "planner_next":
+        raise ValueError(f"Expected feature_mode='planner_next', got {config.feature_mode!r}")
+    current_q = np.asarray(current_q_norm, dtype=np.float32).reshape(-1)
+    q_dim = int(current_q.shape[0])
+    target_q = _as_planner_window(target_q_norm, horizon=int(config.goal_horizon), dim=q_dim, name="target_q_norm")
+    parts: list[np.ndarray] = []
+    if config.include_qpos:
+        parts.append(current_q)
+    if config.include_qvel:
+        if current_qvel_norm is None:
+            raise ValueError("planner_next include_qvel=true requires current_qvel_norm")
+        parts.append(np.asarray(current_qvel_norm, dtype=np.float32).reshape(-1))
+    if config.include_fingertips:
+        if current_fingertips_norm is None:
+            parts.append(np.zeros((FINGERTIP_DIM,), dtype=np.float32))
+        else:
+            parts.append(np.asarray(current_fingertips_norm, dtype=np.float32).reshape(-1))
+    parts.append(target_q.reshape(-1))
+    parts.append((target_q - current_q.reshape(1, -1)).astype(np.float32).reshape(-1))
+    if config.include_future_qvel:
+        if target_qvel_norm is None:
+            raise ValueError("planner_next include_future_qvel=true requires target_qvel_norm")
+        parts.append(
+            _as_planner_window(
+                target_qvel_norm,
+                horizon=int(config.goal_horizon),
+                dim=q_dim,
+                name="target_qvel_norm",
+            ).reshape(-1)
+        )
+    if config.include_action_history:
+        if action_history_norm is None:
+            raise ValueError("planner_next include_action_history=true requires action_history_norm")
+        parts.append(np.asarray(action_history_norm, dtype=np.float32).reshape(-1))
+    if config.include_goals:
+        if goals_norm is None:
+            raise ValueError("planner_next include_goals=true requires goals_norm")
+        parts.append(np.asarray(goals_norm, dtype=np.float32).reshape(-1))
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+def _as_planner_window(value: np.ndarray, *, horizon: int, dim: int, name: str) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim == 1:
+        if int(horizon) != 1:
+            raise ValueError(f"{name} must have shape [{horizon}, {dim}], got {arr.shape}")
+        arr = arr.reshape(1, -1)
+    elif arr.ndim == 2:
+        arr = arr.reshape(arr.shape[0], arr.shape[1])
+    else:
+        raise ValueError(f"{name} must have shape [{horizon}, {dim}], got {arr.shape}")
+    if arr.shape != (int(horizon), int(dim)):
+        raise ValueError(f"{name} must have shape [{horizon}, {dim}], got {arr.shape}")
+    return arr.astype(np.float32)
 
 
 def _append_current(parts: list[np.ndarray], episode: dict[str, np.ndarray | None], *, t: int, config: SampleConfig) -> None:

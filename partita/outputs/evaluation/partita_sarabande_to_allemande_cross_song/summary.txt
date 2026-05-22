@@ -1,0 +1,47 @@
+action_l1: 0.5898953080177307
+action_mse: 0.5413283705711365
+action_smoothness_original: 0.2962949872016907
+action_smoothness_ratio: 0.35926113029457823
+action_smoothness_reconstructed: 0.10644727200269699
+is_cross_song: True
+max_primitive_usage_fraction: 0.226890756302521
+mean_primitive_coverage_across_trajectories: 1.0
+num_primitives: 32
+num_target_segments: 119
+num_training_trajectories: 64
+original_target_actions_executed: 550
+original_target_audio_midi_note_event_count: 910
+original_target_audio_warning: Audio mux skipped because ffmpeg was not found on PATH.
+original_target_render_error: None
+original_target_rollout_key_f1: 0.09543568464730291
+original_target_rollout_key_precision: 0.15818431911966988
+original_target_rollout_key_recall: 0.06833036244800951
+original_target_rollout_mispress_rate: 0.8418156808803301
+original_target_rollout_note: Original-target rollout metrics are replay-system diagnostics, not Partita model performance.
+original_target_rollout_scored_steps: 550
+original_target_rollout_scoring_source: robopianist_piano_activation_from_replayed_actions
+original_target_terminated: False
+original_target_total_reward: 1195.060135034124
+original_target_video_path: /WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_to_allemande_cross_song/original_target_rollout.mp4
+primitive_entropy: 2.567392957393489
+reconstructed_actions_executed: 550
+reconstructed_audio_midi_note_event_count: 308
+reconstructed_audio_warning: Audio mux skipped because ffmpeg was not found on PATH.
+reconstructed_render_error: None
+reconstructed_rollout_key_f1: 0.01978136387298282
+reconstructed_rollout_key_precision: 0.07983193277310924
+reconstructed_rollout_key_recall: 0.0112893642305407
+reconstructed_rollout_mispress_rate: 0.9201680672268907
+reconstructed_rollout_scored_steps: 550
+reconstructed_rollout_scoring_source: robopianist_piano_activation_from_replayed_actions
+reconstructed_terminated: False
+reconstructed_total_reward: 1317.4283937275197
+reconstructed_video_path: /WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_to_allemande_cross_song/reconstructed_rollout.mp4
+reconstructed_vs_original_rollout_key_f1_ratio: 0.20727429101690695
+scoring_validation_note: Primary key metrics come from RoboPianist piano activation produced by replayed reconstructed actions.
+scoring_validation_status: rollout_scored
+source_song_name: RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0
+target_fraction_primitives_used: 0.625
+target_primitive_usage_counts: {'0': 1, '1': 2, '2': 4, '3': 1, '4': 9, '5': 27, '6': 1, '7': 2, '8': 6, '9': 5, '10': 4, '15': 8, '20': 6, '23': 2, '24': 15, '25': 6, '27': 1, '28': 2, '29': 14, '30': 3}
+target_song_name: RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0_0
+target_unique_primitives_used: 20

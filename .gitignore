@@ -21,6 +21,8 @@ extracted_midis/
 !Sonata/configs/data/**
 !Sonata/src/sonata/data/
 !Sonata/src/sonata/data/**
+!Etude/src/etude/data/
+!Etude/src/etude/data/target_schema.py
 Sonata/outputs/primitives/medium/features/
 Sonata/outputs/primitives/medium/segments/
 Sonata/outputs/primitives/medium/tokens/

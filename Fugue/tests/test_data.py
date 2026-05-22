@@ -10,6 +10,7 @@ from fugue.data import (
     FugueActionDataset,
     SampleConfig,
     audit_song,
+    build_planner_next_feature,
     build_demo_manifest,
     compute_press_mask,
     finite_difference,
@@ -96,6 +97,57 @@ def test_audit_manifest_and_dataset_shapes(tmp_path: Path) -> None:
     assert sequence.feature_dim == expected_token_dim
     assert sequence_sample["features"].shape == (7, expected_token_dim)
     assert sequence_sample["actions"].shape == (2, 39)
+
+    planner_cfg = SampleConfig(feature_mode="planner_next", lookahead=1, include_qpos=True, include_qvel=True)
+    planner = FugueActionDataset(
+        dataset_root=root,
+        manifest=manifest,
+        stats=stats,
+        song_key=SONG_KEY,
+        split="train",
+        sample_config=planner_cfg,
+    )
+    planner_sample = planner[0]
+    assert planner.feature_dim == 184
+    assert planner_sample["features"].shape == (184,)
+    assert planner_sample["actions"].shape == (1, 39)
+
+
+def test_planner_next_feature_builder_matches_expected_shape() -> None:
+    cfg = SampleConfig(feature_mode="planner_next", include_qpos=True, include_qvel=True)
+    feature = build_planner_next_feature(
+        current_q_norm=np.zeros((46,), dtype=np.float32),
+        current_qvel_norm=np.ones((46,), dtype=np.float32),
+        target_q_norm=np.ones((46,), dtype=np.float32) * 2.0,
+        config=cfg,
+    )
+    assert feature.shape == (184,)
+    np.testing.assert_allclose(feature[:46], 0.0)
+    np.testing.assert_allclose(feature[46:92], 1.0)
+    np.testing.assert_allclose(feature[92:138], 2.0)
+    np.testing.assert_allclose(feature[138:184], 2.0)
+
+
+def test_planner_next_feature_builder_uses_full_target_window() -> None:
+    cfg = SampleConfig(
+        feature_mode="planner_next",
+        goal_horizon=3,
+        include_qpos=True,
+        include_qvel=True,
+        include_future_qvel=True,
+    )
+    target = np.arange(3 * 46, dtype=np.float32).reshape(3, 46)
+    feature = build_planner_next_feature(
+        current_q_norm=np.ones((46,), dtype=np.float32),
+        current_qvel_norm=np.zeros((46,), dtype=np.float32),
+        target_q_norm=target,
+        target_qvel_norm=np.ones((3, 46), dtype=np.float32) * 3.0,
+        config=cfg,
+    )
+    assert feature.shape == (92 + 3 * 46 + 3 * 46 + 3 * 46,)
+    np.testing.assert_allclose(feature[92 : 92 + 3 * 46], target.reshape(-1))
+    np.testing.assert_allclose(feature[92 + 3 * 46 : 92 + 6 * 46], (target - 1.0).reshape(-1))
+    np.testing.assert_allclose(feature[-3 * 46 :], 3.0)
 
 
 def test_press_mask_dilates_active_and_onset_frames() -> None:

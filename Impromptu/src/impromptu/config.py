@@ -12,12 +12,24 @@ class ImpromptuConfig:
     reduced_action_space: bool = True
 
     # Fingertip trajectory planning.
+    trajectory_mode: str = "joint_space_straighten"
     interpolation_substeps: int = 10
     approach_s: float = 0.055
     hold_s: float = 0.008
     release_s: float = 0.025
     clearance_height: float = 0.04
     key_press_depth: float = 0.005
+
+    # Joint-space transition planning. The default planner keeps Bagatelle's
+    # sparse press poses, then inserts straight-finger anchors between them.
+    joint_space_straight_value: float = 0.0
+    joint_space_release_fraction: float = 0.25
+    joint_space_approach_fraction: float = 0.35
+    joint_space_straighten_all_fingers: bool = False
+    joint_space_preserve_sustained_fingers: bool = True
+    joint_space_straighten_idle_fingers_at_waypoints: bool = True
+    joint_space_lift_straight_anchors: bool = False
+    joint_space_straight_lift_height: float = 0.02
 
     # Fingertip attraction/clearance shaping.
     inactive_clearance_height: float = 0.04

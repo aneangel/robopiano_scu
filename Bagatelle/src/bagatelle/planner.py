@@ -390,6 +390,8 @@ def _metadata_from_results(
                 "smoothness": float(config.ik_smoothness_weight),
                 "neutral": float(config.ik_neutral_weight),
                 "inactive_fingertip_clearance": float(config.ik_inactive_fingertip_clearance_weight),
+                "unassigned_fingertip_strategy": str(config.ik_unassigned_fingertip_strategy),
+                "unassigned_fingertip_avoidance": float(config.ik_unassigned_fingertip_avoidance_weight),
                 "wrong_key_xy_avoidance": float(config.ik_wrong_key_xy_avoidance_weight),
             },
         },

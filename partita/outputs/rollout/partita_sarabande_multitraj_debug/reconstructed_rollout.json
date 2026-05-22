@@ -1,0 +1,90 @@
+{
+  "action_dim_environment": 39,
+  "action_mapping": "as_is",
+  "action_source_scale": "normalized_minus_one_to_one",
+  "actions_executed": 550,
+  "actions_shape": [
+    550,
+    39
+  ],
+  "audio_midi_note_event_count": 190,
+  "audio_source": "robopianist_piano_midi_keypress_events",
+  "audio_warning": null,
+  "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+  "fidelity": {
+    "against_goals": {
+      "key_f1": 0.052230685527747546,
+      "key_precision": 0.17843866171003717,
+      "key_recall": 0.030592734225621414,
+      "mispress_rate": 0.8215613382899628,
+      "scored_keys": 88,
+      "scored_steps": 550
+    },
+    "against_rp1m_piano_states": {
+      "key_f1": 0.057823129251700675,
+      "key_precision": 0.1895910780669145,
+      "key_recall": 0.03411371237458194,
+      "mispress_rate": 0.8104089219330854,
+      "scored_keys": 88,
+      "scored_steps": 550
+    },
+    "hand_qpos_available": true,
+    "hand_qpos_l2_first_n_window": 50,
+    "hand_qpos_l2_max": 3.649604558944702,
+    "hand_qpos_l2_mean": 1.5268037571690298,
+    "hand_qpos_l2_mean_first_n": 1.3966491436958313,
+    "piano_state_iou_mean": 0.029787878787878787,
+    "piano_states_available": true,
+    "scored_steps": 550
+  },
+  "label": "reconstructed",
+  "metrics_note": "Episode did not terminate before action sequence ended; final musical metrics unavailable.",
+  "midi_proto_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_multitraj_debug/reconstructed_target_goals.proto",
+  "prefer_canonical_midi": true,
+  "reduced_action_space": true,
+  "render_error": null,
+  "rendered_frames": 551,
+  "require_exact_action_dim": true,
+  "restore_info": {
+    "hand_joints_restored": 46,
+    "piano_state_restored": true,
+    "qvel_zeroed": true,
+    "sustain_restored": true
+  },
+  "restore_initial_state": true,
+  "rollout_key_f1": 0.052230685527747546,
+  "rollout_key_precision": 0.17843866171003717,
+  "rollout_key_recall": 0.030592734225621414,
+  "rollout_mispress_rate": 0.8215613382899628,
+  "rollout_scored_keys": 88,
+  "rollout_scored_steps": 550,
+  "rollout_scoring_source": "robopianist_piano_activation_from_replayed_actions",
+  "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0",
+  "suite_load_kwargs": {
+    "legacy_step": true,
+    "midi_file": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_multitraj_debug/reconstructed_target_goals.proto",
+    "shift": 0,
+    "stretch": 1.0
+  },
+  "task_kwargs": {
+    "control_timestep": 0.05,
+    "disable_colorization": false,
+    "disable_fingering_reward": false,
+    "disable_forearm_reward": false,
+    "disable_hand_collisions": false,
+    "energy_penalty_coef": 0.005,
+    "gravity_compensation": false,
+    "initial_buffer_time": 0.0,
+    "n_steps_lookahead": 1,
+    "primitive_fingertip_collisions": false,
+    "randomize_hand_positions": false,
+    "reduced_action_space": true,
+    "trim_silence": false,
+    "wrong_press_termination": false
+  },
+  "terminated": false,
+  "total_reward": 1434.6521409973145,
+  "used_canonical_midi": false,
+  "video_format": "mp4",
+  "video_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_multitraj_debug/reconstructed_rollout.mp4"
+}

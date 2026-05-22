@@ -1,0 +1,47 @@
+action_l1: 0.3071935474872589
+action_mse: 0.16601020097732544
+action_smoothness_original: 0.23717008531093597
+action_smoothness_ratio: 0.14627295182931369
+action_smoothness_reconstructed: 0.034691568464040756
+is_cross_song: False
+max_primitive_usage_fraction: 0.09615384615384616
+mean_primitive_coverage_across_trajectories: 1.0
+num_primitives: 32
+num_target_segments: 52
+num_training_trajectories: 64
+original_target_actions_executed: 550
+original_target_audio_midi_note_event_count: 656
+original_target_audio_warning: Audio mux skipped because ffmpeg was not found on PATH.
+original_target_render_error: None
+original_target_rollout_key_f1: 0.0686412787964269
+original_target_rollout_key_precision: 0.13082437275985664
+original_target_rollout_key_recall: 0.04652644996813257
+original_target_rollout_mispress_rate: 0.8691756272401434
+original_target_rollout_note: Original-target rollout metrics are replay-system diagnostics, not Partita model performance.
+original_target_rollout_scored_steps: 550
+original_target_rollout_scoring_source: robopianist_piano_activation_from_replayed_actions
+original_target_terminated: False
+original_target_total_reward: 1242.1659182829517
+original_target_video_path: /WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_multitraj_debug/original_target_rollout.mp4
+primitive_entropy: 3.303028597883988
+reconstructed_actions_executed: 550
+reconstructed_audio_midi_note_event_count: 190
+reconstructed_audio_warning: Audio mux skipped because ffmpeg was not found on PATH.
+reconstructed_render_error: None
+reconstructed_rollout_key_f1: 0.052230685527747546
+reconstructed_rollout_key_precision: 0.17843866171003717
+reconstructed_rollout_key_recall: 0.030592734225621414
+reconstructed_rollout_mispress_rate: 0.8215613382899628
+reconstructed_rollout_scored_steps: 550
+reconstructed_rollout_scoring_source: robopianist_piano_activation_from_replayed_actions
+reconstructed_terminated: False
+reconstructed_total_reward: 1434.6521409973145
+reconstructed_video_path: /WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_multitraj_debug/reconstructed_rollout.mp4
+reconstructed_vs_original_rollout_key_f1_ratio: 0.7609223843665687
+scoring_validation_note: Primary key metrics come from RoboPianist piano activation produced by replayed reconstructed actions.
+scoring_validation_status: rollout_scored
+source_song_name: RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0
+target_fraction_primitives_used: 1.0
+target_primitive_usage_counts: {'0': 1, '1': 5, '2': 1, '3': 1, '4': 4, '5': 1, '6': 1, '7': 1, '8': 3, '9': 1, '10': 2, '11': 1, '12': 2, '13': 1, '14': 3, '15': 1, '16': 1, '17': 1, '18': 1, '19': 1, '20': 3, '21': 3, '22': 1, '23': 1, '24': 2, '25': 2, '26': 1, '27': 2, '28': 1, '29': 1, '30': 1, '31': 1}
+target_song_name: RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0
+target_unique_primitives_used: 32

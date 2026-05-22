@@ -1,0 +1,62 @@
+{
+  "action_mapping": "as_is",
+  "action_source_scale": "normalized_minus_one_to_one",
+  "experiment_name": "partita_sarabande_multitraj_debug",
+  "fidelity": {
+    "against_goals": {
+      "key_f1": 0.0686412787964269,
+      "key_precision": 0.13082437275985664,
+      "key_recall": 0.04652644996813257,
+      "mispress_rate": 0.8691756272401434,
+      "scored_keys": 88,
+      "scored_steps": 550
+    },
+    "against_rp1m_piano_states": {
+      "key_f1": 0.08085728202630296,
+      "key_precision": 0.14874551971326164,
+      "key_recall": 0.05551839464882943,
+      "mispress_rate": 0.8512544802867383,
+      "scored_keys": 88,
+      "scored_steps": 550
+    },
+    "hand_qpos_available": true,
+    "hand_qpos_l2_first_n_window": 50,
+    "hand_qpos_l2_max": 1.9067494869232178,
+    "hand_qpos_l2_mean": 1.21924325986342,
+    "hand_qpos_l2_mean_first_n": 0.9745207631587982,
+    "piano_state_iou_mean": 0.042928571428571434,
+    "piano_states_available": true,
+    "scored_steps": 550
+  },
+  "prefer_canonical_midi": true,
+  "restore_initial_state": true,
+  "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0",
+  "task_kwargs": {
+    "control_timestep": 0.05,
+    "disable_colorization": false,
+    "disable_fingering_reward": false,
+    "disable_forearm_reward": false,
+    "disable_hand_collisions": false,
+    "energy_penalty_coef": 0.005,
+    "gravity_compensation": false,
+    "initial_buffer_time": 0.0,
+    "n_steps_lookahead": 1,
+    "primitive_fingertip_collisions": false,
+    "randomize_hand_positions": false,
+    "reduced_action_space": true,
+    "trim_silence": false,
+    "wrong_press_termination": false
+  },
+  "used_canonical_midi": false,
+  "verdict": {
+    "checks": {
+      "goal_f1_gt_0_50": false,
+      "hand_qpos_l2_mean_first_n_lt_1e-3": false,
+      "rp1m_piano_state_f1_gt_0_95": false
+    },
+    "goal_f1": 0.0686412787964269,
+    "hand_qpos_l2_mean_first_n": 0.9745207631587982,
+    "passed": false,
+    "rp1m_piano_state_f1": 0.08085728202630296
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "action_dim_environment": 39,
+  "action_source_scale": "normalized_minus_one_to_one",
+  "actions_executed": 550,
+  "actions_shape": [
+    550,
+    39
+  ],
+  "audio_midi_note_event_count": 910,
+  "audio_source": "robopianist_piano_midi_keypress_events",
+  "audio_warning": "Audio mux skipped because ffmpeg was not found on PATH.",
+  "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0",
+  "label": "original_target",
+  "metrics_note": "Episode did not terminate before action sequence ended; final musical metrics unavailable.",
+  "midi_proto_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_to_allemande_cross_song/original_target_target_goals.proto",
+  "reduced_action_space": true,
+  "render_error": null,
+  "rendered_frames": 551,
+  "require_exact_action_dim": true,
+  "rollout_key_f1": 0.09543568464730291,
+  "rollout_key_precision": 0.15818431911966988,
+  "rollout_key_recall": 0.06833036244800951,
+  "rollout_mispress_rate": 0.8418156808803301,
+  "rollout_scored_keys": 88,
+  "rollout_scored_steps": 550,
+  "rollout_scoring_source": "robopianist_piano_activation_from_replayed_actions",
+  "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo1Allemande-v0_0",
+  "terminated": false,
+  "total_reward": 1195.060135034124,
+  "video_format": "mp4",
+  "video_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rollout/partita_sarabande_to_allemande_cross_song/original_target_rollout.mp4"
+}

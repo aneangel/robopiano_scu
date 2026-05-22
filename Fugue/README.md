@@ -153,6 +153,51 @@ Available later-model configs:
 - `model_e_action_chunk_transformer.yaml`: causal transformer, `C=4` action chunks.
 - `model_e_chunk_history.yaml`: flattened history MLP, `C=4` action chunks.
 
+## Planner-Next Controller
+
+Model F is the first deployable planner-conditioned inverse-dynamics controller. It learns from a
+short target hand trajectory window, not just one target pose:
+
+```text
+f(q_sim_or_demo[t],
+  dq_sim_or_demo[t],
+  a_history[t-H:t],
+  q_target[t+1:t+K],
+  dq_target[t+1:t+K],
+  q_target[t+1:t+K] - q_sim_or_demo[t],
+  score_goals[t:t+K]) -> action[t]
+```
+
+During training, `q_sim_or_demo[t]` is the recorded RP1M hand state. During online rollout,
+`q_sim_or_demo[t]` is captured from RoboPianist after the previous action, while
+`q_target[t+1:t+K]` comes from a planner. The first diagnostic planner is an unseen
+demonstration's hand-state trajectory. The default config uses `H=8` and `K=16`.
+
+Train:
+
+```bash
+python Fugue/scripts/train_action_model.py \
+  --config Fugue/configs/model_f_planner_next.yaml \
+  --rp1m-root "$RP1M_300_ROOT" \
+  --output-root "$OUTPUT_ROOT/model_f_planner_next" \
+  --delta 0
+```
+
+Closed-loop planner-following rollout:
+
+```bash
+python Fugue/scripts/rollout_planner_next.py \
+  --checkpoint "$OUTPUT_ROOT/model_f_planner_next/checkpoints/best.pt" \
+  --rp1m-root "$RP1M_300_ROOT" \
+  --dataset-artifact-root "$OUTPUT_ROOT/model_f_planner_next/dataset" \
+  --split test \
+  --demo-index 0 \
+  --output-dir "$OUTPUT_ROOT/model_f_planner_next_rollout"
+```
+
+The rollout video audio is generated from RoboPianist piano MIDI keypress events produced by
+the simulated hands, not from the target score.
+
 ## Export Predicted Actions
 
 ```bash

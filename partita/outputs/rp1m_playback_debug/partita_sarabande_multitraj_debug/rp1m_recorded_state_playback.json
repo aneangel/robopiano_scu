@@ -1,0 +1,41 @@
+{
+  "against_goals": {
+    "key_f1": 0.8598425196850394,
+    "key_precision": 0.931740614334471,
+    "key_recall": 0.7982456140350878,
+    "mispress_rate": 0.06825938566552901,
+    "scored_keys": 88,
+    "scored_steps": 120
+  },
+  "against_rp1m_piano_states": {
+    "key_f1": 1.0,
+    "key_precision": 1.0,
+    "key_recall": 1.0,
+    "mispress_rate": 0.0,
+    "scored_keys": 88,
+    "scored_steps": 120
+  },
+  "audio_midi_note_event_count": 42,
+  "audio_source": "recorded_rp1m_piano_state_key_transitions",
+  "audio_warning": "Audio mux skipped because ffmpeg was not found on PATH.",
+  "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+  "hand_joints_shape": [
+    550,
+    46
+  ],
+  "label": "rp1m_recorded_state",
+  "midi_proto_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rp1m_playback_debug/partita_sarabande_multitraj_debug/rp1m_recorded_state_target_goals.proto",
+  "piano_states_shape": [
+    550,
+    89
+  ],
+  "playback_mode": "recorded_rp1m_hand_joints_and_piano_states",
+  "render_error": null,
+  "render_every": 1,
+  "rendered_frames": 120,
+  "restored_hand_joint_count": 46,
+  "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0",
+  "steps_rendered": 120,
+  "video_format": "mp4",
+  "video_path": "/WAVE/projects2/ECEN-524-Wi26/robopiano/partita/outputs/rp1m_playback_debug/partita_sarabande_multitraj_debug/rp1m_recorded_state_playback.mp4"
+}

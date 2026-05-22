@@ -1,0 +1,23 @@
+rp1m_root: /WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
+song_name: RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0
+num_demos: 50
+dt: 0.05
+window_frames: 64
+pre_frames: 24
+chord_tolerance_frames: 1
+event_tolerance_frames: 3
+seam_blend_radius: 4
+objective_mode: strict
+repair_enabled: true
+repair_max_passes: 2
+repair_transition_margin: 250.0
+adaptive_seam_enabled: true
+seam_search_margin_frames: 3
+transition_interpolation_enabled: true
+output_root: /WAVE/datasets/ccoelho_lab-jlanders/Nocturne/runs/french_sarabande_v1
+wandb:
+  required: true
+  project: robopianist
+  tags:
+    - nocturne
+    - stitched-controller

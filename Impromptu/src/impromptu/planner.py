@@ -8,6 +8,12 @@ from impromptu.config import ImpromptuConfig
 from impromptu.anchor_selection import select_ik_anchor_frames
 from impromptu.fingertip_trajectory import NUM_FINGERS, FingertipTrajectory, build_fingertip_trajectory
 from impromptu.ik_solver import IK_ANCHOR_METRIC_COLUMNS, interpolate_anchor_qpos, solve_fingertip_trajectory_anchors
+from impromptu.joint_space_trajectory import (
+    TRAJECTORY_MODE_DENSE_FINGERTIP_IK,
+    TRAJECTORY_MODE_JOINT_SPACE_STRAIGHTEN,
+    TRAJECTORY_MODES,
+    build_joint_space_straightened_trajectory,
+)
 from impromptu.paths import ensure_repo_paths
 from impromptu.trajectory_refinement import refine_dense_qpos_trajectory
 from impromptu.trajectory import ImpromptuTrajectory
@@ -24,10 +30,10 @@ from intermezzo.planner import compute_hand_velocities  # noqa: E402
 def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
     """Return the Bagatelle configuration used for all assignment and IK.
 
-    Keep this intentionally narrow. Runtime selection comes from Impromptu,
-    while assignment, key-target construction, IK objective weights, joint
-    order, and inter-waypoint planning stay on Bagatelle defaults unless the
-    caller passes an explicit Bagatelle kinematics object.
+    Impromptu owns dense anchor selection and trajectory IK, while Bagatelle
+    still owns sparse key-to-finger assignment and press-pose seeds. Forward
+    the Impromptu CLI knobs that affect those Bagatelle responsibilities so a
+    single planning command has coherent assignment and seed-IK behavior.
     """
     return BagatelleConfig(
         control_timestep=float(config.control_timestep),
@@ -35,6 +41,25 @@ def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
         environment_name=str(config.environment_name),
         seed=int(config.seed),
         reduced_action_space=bool(config.reduced_action_space),
+        ik_fingertip_weight=float(config.ik_fingertip_weight),
+        ik_smoothness_weight=float(config.ik_smoothness_weight),
+        ik_neutral_weight=float(config.ik_neutral_weight),
+        ik_max_nfev=int(config.ik_max_nfev),
+        ik_ftol=float(config.ik_ftol),
+        ik_xtol=float(config.ik_xtol),
+        ik_gtol=float(config.ik_gtol),
+        residual_success_threshold=float(config.residual_success_threshold),
+        key_press_depth=float(config.key_press_depth),
+        distance_weight=float(config.assignment_distance_weight),
+        same_finger_bonus=float(config.same_finger_bonus),
+        reassignment_penalty=float(config.reassignment_penalty),
+        finger_crossing_penalty=float(config.finger_crossing_penalty),
+        wrong_hand_penalty=float(config.wrong_hand_penalty),
+        large_jump_penalty=float(config.large_jump_penalty),
+        same_key_same_finger_bonus=float(config.same_key_same_finger_bonus),
+        assignment_distance_weight=float(config.assignment_distance_weight),
+        assignment_crossing_weight=float(config.finger_crossing_penalty),
+        assignment_wrong_hand_penalty=float(config.wrong_hand_penalty),
     )
 
 
@@ -133,6 +158,57 @@ def _control_frame_anchor_metrics(
     return np.zeros((0, len(IK_ANCHOR_METRIC_COLUMNS)), dtype=np.float32)
 
 
+def _anchor_results_for_qpos_rows(
+    *,
+    anchor_frames: np.ndarray,
+    anchor_qpos: np.ndarray,
+    anchor_fingertips: np.ndarray,
+    fingertip_targets: np.ndarray,
+    fingertip_weights: np.ndarray,
+    config: ImpromptuConfig,
+    message: str,
+) -> tuple[IKResult, ...]:
+    results: list[IKResult] = []
+    for row, dense_frame in enumerate(np.asarray(anchor_frames, dtype=np.int64).reshape(-1)):
+        if 0 <= int(dense_frame) < fingertip_targets.shape[0]:
+            targets = np.asarray(fingertip_targets[int(dense_frame)], dtype=np.float32)
+            weights = np.asarray(fingertip_weights[int(dense_frame)], dtype=np.float32)
+        else:
+            targets = np.full((NUM_FINGERS, 3), np.nan, dtype=np.float32)
+            weights = np.zeros((NUM_FINGERS,), dtype=np.float32)
+        mask = np.isfinite(targets).all(axis=1) & (weights > 0.0)
+        active_fingers = np.flatnonzero(mask).astype(np.int32)
+        if active_fingers.size:
+            distances = np.linalg.norm(
+                anchor_fingertips[row, active_fingers.astype(np.int64)] - targets[active_fingers.astype(np.int64)],
+                axis=1,
+            ).astype(np.float32)
+        else:
+            distances = np.zeros((0,), dtype=np.float32)
+        max_residual = float(np.max(distances)) if distances.size else 0.0
+        residual_norm = float(np.linalg.norm(distances)) if distances.size else 0.0
+        results.append(
+            IKResult(
+                pose=np.asarray(anchor_qpos[row], dtype=np.float32).copy(),
+                fingertip_positions=np.asarray(anchor_fingertips[row], dtype=np.float32).copy(),
+                assigned_distances=distances,
+                residual_norm=residual_norm,
+                max_residual=max_residual,
+                success=bool(max_residual <= float(config.residual_success_threshold)),
+                optimizer_success=True,
+                optimizer_status=0,
+                optimizer_message=message,
+                optimizer_cost=0.0,
+                nfev=0,
+                active_keys=np.zeros((0,), dtype=np.int32),
+                assigned_keys=np.full((active_fingers.size,), -1, dtype=np.int32),
+                assigned_finger_indices=active_fingers,
+                unassigned_keys=np.zeros((0,), dtype=np.int32),
+            )
+        )
+    return tuple(results)
+
+
 def _fingertips_for_qpos_rows(kin: Any, qpos_rows: np.ndarray) -> np.ndarray:
     qpos = np.asarray(qpos_rows, dtype=np.float32)
     if qpos.size == 0:
@@ -193,61 +269,119 @@ def plan_target_keys(
             0,
             max(dense_total - 1, 0),
         ).astype(np.int64)
-        anchor_frames = select_ik_anchor_frames(
-            fingertip_targets=fingertip_traj.targets,
-            fingertip_weights=fingertip_traj.weights,
-            waypoint_frames_dense=waypoint_frames_dense,
-            config=cfg,
-        )
-        anchor_seed_qpos = bagatelle_dense_seed[anchor_frames] if anchor_frames.size else np.zeros((0, HAND_STATE_DIM), dtype=np.float32)
         neutral_qpos = np.asarray(getattr(kin, "neutral_qpos", np.zeros((HAND_STATE_DIM,), dtype=np.float32)), dtype=np.float32)
-        anchor_solution = solve_fingertip_trajectory_anchors(
-            kin=kin,
-            fingertip_targets=fingertip_traj.targets,
-            fingertip_weights=fingertip_traj.weights,
-            anchor_frames=anchor_frames,
-            initial_qpos=anchor_seed_qpos,
-            neutral_qpos=neutral_qpos,
-            config=cfg,
-        )
-        anchor_solution_qpos = anchor_solution.qpos
-        anchor_solution_tips = anchor_solution.fingertips
-        anchor_metrics = anchor_solution.metrics
-        anchor_results = anchor_solution.results
-        if bool(cfg.preserve_waypoint_press_qpos) and anchor_solution_qpos.size and waypoint_frames_dense.size:
-            blend = float(np.clip(float(cfg.waypoint_qpos_blend), 0.0, 1.0))
-            if blend > 0.0:
-                anchor_solution_qpos = anchor_solution_qpos.astype(np.float32, copy=True)
-                for waypoint_row, dense_frame in enumerate(waypoint_frames_dense.astype(np.int64)):
-                    rows = np.flatnonzero(anchor_frames == int(dense_frame))
-                    if rows.size and waypoint_row < bagatelle_plan.waypoint_hand_joints.shape[0]:
-                        row = int(rows[0])
-                        seed = np.asarray(bagatelle_plan.waypoint_hand_joints[waypoint_row], dtype=np.float32)
-                        anchor_solution_qpos[row] = ((1.0 - blend) * anchor_solution_qpos[row] + blend * seed).astype(
-                            np.float32
-                        )
-                anchor_solution_tips = _fingertips_for_qpos_rows(kin, anchor_solution_qpos)
-                anchor_metrics = _control_frame_anchor_metrics(
-                    anchor_frames=anchor_frames,
-                    anchor_fingertips=anchor_solution_tips,
-                    fingertip_targets=fingertip_traj.targets,
-                    fingertip_weights=fingertip_traj.weights,
-                    config=cfg,
-                )
-        planned_dense, segment_ids_dense = interpolate_anchor_qpos(
-            anchor_frames=anchor_frames,
-            anchor_qpos=anchor_solution_qpos,
-            dense_total=dense_total,
-        )
-        refinement_metadata: dict[str, object] = {"enabled": False, "chunks": 0, "optimizer_success_count": 0, "nfev_sum": 0}
-        planned_dense, refinement_metadata = refine_dense_qpos_trajectory(
-            kin=kin,
-            dense_qpos=planned_dense,
-            fingertip_targets=fingertip_traj.targets,
-            fingertip_weights=fingertip_traj.weights,
-            neutral_qpos=neutral_qpos,
-            config=cfg,
-        )
+        trajectory_mode = str(cfg.trajectory_mode)
+        if trajectory_mode not in TRAJECTORY_MODES:
+            raise ValueError(f"trajectory_mode must be one of {TRAJECTORY_MODES}, got {trajectory_mode!r}")
+
+        joint_space_metadata: dict[str, object] = {}
+        if trajectory_mode == TRAJECTORY_MODE_JOINT_SPACE_STRAIGHTEN:
+            joint_space_plan = build_joint_space_straightened_trajectory(
+                total_steps=int(keys.shape[0]),
+                waypoint_frames=bagatelle_plan.waypoint_frames,
+                waypoint_qpos=bagatelle_plan.waypoint_hand_joints,
+                assignments=bagatelle_plan.assignments,
+                neutral_qpos=neutral_qpos,
+                config=cfg,
+                kinematics=kin,
+            )
+            anchor_frames = joint_space_plan.anchor_frames
+            anchor_solution_qpos = joint_space_plan.anchor_qpos
+            waypoint_hand_joints_out = joint_space_plan.waypoint_qpos
+            planned_dense = joint_space_plan.dense_qpos
+            segment_ids_dense = joint_space_plan.segment_ids
+            joint_space_metadata = dict(joint_space_plan.metadata)
+            anchor_solution_tips = _fingertips_for_qpos_rows(kin, anchor_solution_qpos)
+            anchor_metrics = _control_frame_anchor_metrics(
+                anchor_frames=anchor_frames,
+                anchor_fingertips=anchor_solution_tips,
+                fingertip_targets=fingertip_traj.targets,
+                fingertip_weights=fingertip_traj.weights,
+                config=cfg,
+            )
+            anchor_results = _anchor_results_for_qpos_rows(
+                anchor_frames=anchor_frames,
+                anchor_qpos=anchor_solution_qpos,
+                anchor_fingertips=anchor_solution_tips,
+                fingertip_targets=fingertip_traj.targets,
+                fingertip_weights=fingertip_traj.weights,
+                config=cfg,
+                message="joint-space straight-finger anchor; no dense fingertip IK solve",
+            )
+            refinement_metadata = {
+                "enabled": False,
+                "skipped": "joint_space_straighten_mode",
+                "chunks": 0,
+                "optimizer_success_count": 0,
+                "nfev_sum": 0,
+            }
+        elif trajectory_mode == TRAJECTORY_MODE_DENSE_FINGERTIP_IK:
+            waypoint_hand_joints_out = bagatelle_plan.waypoint_hand_joints
+            anchor_frames = select_ik_anchor_frames(
+                fingertip_targets=fingertip_traj.targets,
+                fingertip_weights=fingertip_traj.weights,
+                waypoint_frames_dense=waypoint_frames_dense,
+                config=cfg,
+            )
+            anchor_seed_qpos = (
+                bagatelle_dense_seed[anchor_frames]
+                if anchor_frames.size
+                else np.zeros((0, HAND_STATE_DIM), dtype=np.float32)
+            )
+            anchor_solution = solve_fingertip_trajectory_anchors(
+                kin=kin,
+                fingertip_targets=fingertip_traj.targets,
+                fingertip_weights=fingertip_traj.weights,
+                anchor_frames=anchor_frames,
+                initial_qpos=anchor_seed_qpos,
+                neutral_qpos=neutral_qpos,
+                config=cfg,
+            )
+            anchor_solution_qpos = anchor_solution.qpos
+            anchor_solution_tips = anchor_solution.fingertips
+            anchor_metrics = anchor_solution.metrics
+            anchor_results = anchor_solution.results
+            if bool(cfg.preserve_waypoint_press_qpos) and anchor_solution_qpos.size and waypoint_frames_dense.size:
+                blend = float(np.clip(float(cfg.waypoint_qpos_blend), 0.0, 1.0))
+                if blend > 0.0:
+                    anchor_solution_qpos = anchor_solution_qpos.astype(np.float32, copy=True)
+                    for waypoint_row, dense_frame in enumerate(waypoint_frames_dense.astype(np.int64)):
+                        rows = np.flatnonzero(anchor_frames == int(dense_frame))
+                        if rows.size and waypoint_row < bagatelle_plan.waypoint_hand_joints.shape[0]:
+                            row = int(rows[0])
+                            seed = np.asarray(bagatelle_plan.waypoint_hand_joints[waypoint_row], dtype=np.float32)
+                            anchor_solution_qpos[row] = (
+                                (1.0 - blend) * anchor_solution_qpos[row] + blend * seed
+                            ).astype(np.float32)
+                    anchor_solution_tips = _fingertips_for_qpos_rows(kin, anchor_solution_qpos)
+                    anchor_metrics = _control_frame_anchor_metrics(
+                        anchor_frames=anchor_frames,
+                        anchor_fingertips=anchor_solution_tips,
+                        fingertip_targets=fingertip_traj.targets,
+                        fingertip_weights=fingertip_traj.weights,
+                        config=cfg,
+                    )
+            planned_dense, segment_ids_dense = interpolate_anchor_qpos(
+                anchor_frames=anchor_frames,
+                anchor_qpos=anchor_solution_qpos,
+                dense_total=dense_total,
+            )
+            refinement_metadata: dict[str, object] = {
+                "enabled": False,
+                "chunks": 0,
+                "optimizer_success_count": 0,
+                "nfev_sum": 0,
+            }
+            planned_dense, refinement_metadata = refine_dense_qpos_trajectory(
+                kin=kin,
+                dense_qpos=planned_dense,
+                fingertip_targets=fingertip_traj.targets,
+                fingertip_weights=fingertip_traj.weights,
+                neutral_qpos=neutral_qpos,
+                config=cfg,
+            )
+        else:
+            raise AssertionError(f"unhandled trajectory mode: {trajectory_mode}")
         segment_ids = segment_ids_dense[::substeps][: keys.shape[0]].astype(np.int32, copy=True)
         if segment_ids.shape[0] < keys.shape[0]:
             pad_value = int(segment_ids[-1]) if segment_ids.size else -1
@@ -275,11 +409,23 @@ def plan_target_keys(
         metadata["bagatelle_planner"] = bagatelle_plan.metadata.get("planner", "bagatelle")
         metadata["bagatelle_assignment_mode"] = bagatelle_plan.metadata.get("assignment_mode")
         metadata["bagatelle_config"] = bagatelle_plan.metadata.get("config", bag_cfg.to_dict())
-        metadata["ik_source"] = "Impromptu.solve_fingertip_trajectory_anchors"
+        metadata["trajectory_mode"] = trajectory_mode
         metadata["assignment_source"] = "Bagatelle.plan_target_keys"
-        metadata["planned_hand_joints_source"] = "downsampled_from_dense_anchor_ik"
-        metadata["dense_hand_joints_source"] = "interpolated_from_impromptu_dense_ik_anchors"
-        metadata["dense_ik_seed_source"] = "interpolated_bagatelle_control_frame_qpos"
+        if trajectory_mode == TRAJECTORY_MODE_JOINT_SPACE_STRAIGHTEN:
+            metadata["planner"] = "impromptu_joint_space_straighten_assignment"
+            metadata["ik_source"] = "Bagatelle.solve_press_pose_sparse_only"
+            metadata["planned_hand_joints_source"] = "downsampled_from_joint_space_straight_finger_trajectory"
+            metadata["dense_hand_joints_source"] = "joint_space_straight_finger_interpolation"
+            metadata["dense_ik_seed_source"] = "not_used_joint_space_straighten_mode"
+            metadata["waypoint_hand_joints_source"] = "bagatelle_press_qpos_with_idle_fingers_straightened"
+            metadata["fingertip_attraction_forces"] = "disabled_by_joint_space_mode"
+            metadata["joint_space_trajectory"] = joint_space_metadata
+        else:
+            metadata["ik_source"] = "Impromptu.solve_fingertip_trajectory_anchors"
+            metadata["planned_hand_joints_source"] = "downsampled_from_dense_anchor_ik"
+            metadata["dense_hand_joints_source"] = "interpolated_from_impromptu_dense_ik_anchors"
+            metadata["dense_ik_seed_source"] = "interpolated_bagatelle_control_frame_qpos"
+            metadata["waypoint_hand_joints_source"] = "bagatelle_press_qpos"
         metadata["selected_anchor_config"] = {
             "anchor_stride": int(cfg.anchor_stride),
             "solve_contact_window_only": bool(cfg.solve_contact_window_only),
@@ -308,7 +454,7 @@ def plan_target_keys(
             ik_anchor_qpos=anchor_solution_qpos,
             ik_anchor_fingertips=anchor_solution_tips,
             ik_anchor_metrics=anchor_metrics,
-            waypoint_hand_joints=bagatelle_plan.waypoint_hand_joints,
+            waypoint_hand_joints=waypoint_hand_joints_out,
             planned_hand_joints=planned,
             planned_hand_velocities=planned_velocities.astype(np.float32),
             planned_hand_joints_dense=planned_dense.astype(np.float32),

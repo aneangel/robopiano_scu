@@ -33,7 +33,7 @@ DEFAULT_OUTPUT_ROOT = Path("/WAVE/datasets/ccoelho_lab-jlanders/Impromptu/runs")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Plan Impromptu fingertip-space Bagatelle-IK trajectories.")
+    parser = argparse.ArgumentParser(description="Plan Impromptu trajectories from Bagatelle sparse press poses.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--midi-path", default=None)
     source.add_argument("--target-keys-npz", default=None)
@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-window-last-s", type=float, default=None)
     parser.add_argument("--active-window-preroll-s", type=float, default=0.5)
     parser.add_argument("--active-window-postroll-s", type=float, default=0.25)
+    parser.add_argument(
+        "--trajectory-mode",
+        choices=("joint_space_straighten", "dense_fingertip_ik"),
+        default="joint_space_straighten",
+    )
     parser.add_argument("--interpolation-substeps", type=int, default=10)
     parser.add_argument("--approach-s", type=float, default=0.055)
     parser.add_argument("--hold-s", type=float, default=0.008)
@@ -67,6 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--press-lead-s", type=float, default=0.0)
     parser.add_argument("--wrong-key-xy-radius", type=float, default=0.018)
     parser.add_argument("--wrong-key-avoid-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--disable-attraction-forces",
+        action="store_true",
+        help="Zero clearance and wrong-key attraction residuals for dense fingertip IK comparisons.",
+    )
+    parser.add_argument("--joint-space-straight-value", type=float, default=0.0)
+    parser.add_argument("--joint-space-release-fraction", type=float, default=0.25)
+    parser.add_argument("--joint-space-approach-fraction", type=float, default=0.35)
+    parser.add_argument("--joint-space-straighten-all-fingers", action="store_true")
+    parser.add_argument("--no-joint-space-preserve-sustained-fingers", action="store_true")
+    parser.add_argument("--no-joint-space-straighten-idle-waypoint-fingers", action="store_true")
+    parser.add_argument("--joint-space-lift-straight-anchors", action="store_true")
+    parser.add_argument("--joint-space-straight-lift-height", type=float, default=0.02)
     parser.add_argument("--distance-weight", type=float, default=1.0)
     parser.add_argument("--same-finger-bonus", type=float, default=0.0)
     parser.add_argument("--reassignment-penalty", type=float, default=0.0)
@@ -136,11 +154,15 @@ def main() -> None:
     else:
         solve_contact_window_only = False
     press_weight = args.active_press_weight if args.active_press_weight is not None else args.press_weight
+    inactive_clearance_weight = 0.0 if args.disable_attraction_forces else float(args.inactive_clearance_weight)
+    active_clearance_weight = 0.0 if args.disable_attraction_forces else float(args.active_clearance_weight)
+    wrong_key_avoid_weight = 0.0 if args.disable_attraction_forces else float(args.wrong_key_avoid_weight)
     config = ImpromptuConfig(
         control_timestep=float(args.control_timestep),
         threshold=float(args.threshold),
         environment_name=str(args.environment_name),
         seed=int(args.seed),
+        trajectory_mode=str(args.trajectory_mode),
         interpolation_substeps=int(args.interpolation_substeps),
         approach_s=float(args.approach_s),
         hold_s=float(args.hold_s),
@@ -148,8 +170,18 @@ def main() -> None:
         clearance_height=float(args.clearance_height),
         key_press_depth=float(args.key_press_depth),
         inactive_clearance_height=float(args.inactive_clearance_height),
-        inactive_clearance_weight=float(args.inactive_clearance_weight),
-        active_clearance_weight=float(args.active_clearance_weight),
+        joint_space_straight_value=float(args.joint_space_straight_value),
+        joint_space_release_fraction=float(args.joint_space_release_fraction),
+        joint_space_approach_fraction=float(args.joint_space_approach_fraction),
+        joint_space_straighten_all_fingers=bool(args.joint_space_straighten_all_fingers),
+        joint_space_preserve_sustained_fingers=not bool(args.no_joint_space_preserve_sustained_fingers),
+        joint_space_straighten_idle_fingers_at_waypoints=not bool(
+            args.no_joint_space_straighten_idle_waypoint_fingers
+        ),
+        joint_space_lift_straight_anchors=bool(args.joint_space_lift_straight_anchors),
+        joint_space_straight_lift_height=float(args.joint_space_straight_lift_height),
+        inactive_clearance_weight=float(inactive_clearance_weight),
+        active_clearance_weight=float(active_clearance_weight),
         approach_start_weight=float(args.approach_start_weight),
         hover_weight=float(args.hover_weight),
         release_end_weight=float(args.release_end_weight),
@@ -157,7 +189,7 @@ def main() -> None:
         press_weight=float(press_weight),
         press_lead_s=float(args.press_lead_s),
         wrong_key_xy_radius=float(args.wrong_key_xy_radius),
-        wrong_key_avoid_weight=float(args.wrong_key_avoid_weight),
+        wrong_key_avoid_weight=float(wrong_key_avoid_weight),
         assignment_distance_weight=float(args.distance_weight),
         same_finger_bonus=float(args.same_finger_bonus),
         reassignment_penalty=float(args.reassignment_penalty),

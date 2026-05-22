@@ -1,0 +1,93 @@
+{
+  "best": {
+    "action_mapping": "as_is",
+    "action_source_scale": "normalized_minus_one_to_one",
+    "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+    "hand_qpos_l2_max": 3.778240442276001,
+    "hand_qpos_l2_mean": 1.7760653495788574,
+    "probe_steps": 5
+  },
+  "candidates": [
+    {
+      "action_mapping": "as_is",
+      "action_source_scale": "normalized_minus_one_to_one",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 1.7760653495788574,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "swap_hands",
+      "action_source_scale": "normalized_minus_one_to_one",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 2.4562599897384643,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "zero_sustain",
+      "action_source_scale": "normalized_minus_one_to_one",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 1.7760653495788574,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "invert_sustain",
+      "action_source_scale": "normalized_minus_one_to_one",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 1.7760653495788574,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "swap_hands_zero_sustain",
+      "action_source_scale": "normalized_minus_one_to_one",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 2.4562599897384643,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "as_is",
+      "action_source_scale": "actuator_units",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 2.691078209877014,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "swap_hands",
+      "action_source_scale": "actuator_units",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 4.209841728210449,
+      "hand_qpos_l2_mean": 3.024364972114563,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "zero_sustain",
+      "action_source_scale": "actuator_units",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 2.691078209877014,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "invert_sustain",
+      "action_source_scale": "actuator_units",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 3.778240442276001,
+      "hand_qpos_l2_mean": 2.691078209877014,
+      "probe_steps": 5
+    },
+    {
+      "action_mapping": "swap_hands_zero_sustain",
+      "action_source_scale": "actuator_units",
+      "environment_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0",
+      "hand_qpos_l2_max": 4.209841728210449,
+      "hand_qpos_l2_mean": 3.024364972114563,
+      "probe_steps": 5
+    }
+  ],
+  "song_name": "RoboPianist-repertoire-150-FrenchSuiteNo5Sarabande-v0_0"
+}

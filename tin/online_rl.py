@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
 
 try:
     import robopianist.wrappers as robopianist_wrappers
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     robopianist_wrappers = None
 
 try:
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from robopianist import suite
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     suite = None
 
 try:

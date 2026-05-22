@@ -331,6 +331,8 @@ def _approach_name(run_dir: Path, sample_config: dict[str, Any], model_config: d
     model_type = str(model_config.get("type") or "")
     if bool(sample_config.get("oracle_future_hand_state", False)) or mode == "inverse":
         return "Model C oracle inverse dynamics"
+    if mode == "planner_next":
+        return "Model F planner-next inverse dynamics"
     if mode == "sequence":
         if int(sample_config.get("chunk_horizon", 1)) > 1:
             return "Model E action-chunk transformer"

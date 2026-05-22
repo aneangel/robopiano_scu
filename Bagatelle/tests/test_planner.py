@@ -11,7 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from bagatelle.config import BagatelleConfig  # noqa: E402
-from bagatelle.kinematics import IKResult  # noqa: E402
+from bagatelle.kinematics import BagatelleKinematics, IKResult  # noqa: E402
 from bagatelle.planner import IK_METRIC_COLUMNS, plan_target_keys  # noqa: E402
 
 
@@ -160,4 +160,28 @@ def test_metadata_records_finger_joint_and_target_contracts() -> None:
     assert metadata["key_target_mode"] == "press"
     assert metadata["key_target_parameters"] == {"front_offset": 0.35, "top_offset": 0.5, "press_depth": 0.008}
     assert metadata["ik_solver"]["weights"]["inactive_fingertip_clearance"] == 0.0
+    assert metadata["ik_solver"]["weights"]["unassigned_fingertip_strategy"] == "legacy"
     assert len(metadata["per_waypoint_residual_histograms"]) == 2
+
+
+def test_inactive_wrong_key_clearance_residual_only_penalizes_near_low_fingers() -> None:
+    fingertips = np.asarray(
+        [
+            [0.0, 0.0, 0.01],
+            [0.05, 0.0, 0.01],
+            [0.0, 0.0, 0.05],
+        ],
+        dtype=np.float32,
+    )
+    wrong_keys = np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32)
+
+    residual = BagatelleKinematics.inactive_wrong_key_clearance_residual(
+        fingertips,
+        wrong_keys,
+        clearance_z=0.03,
+        radius=0.03,
+    )
+
+    assert residual.reshape(3, 1)[0, 0] > 0.0
+    assert residual.reshape(3, 1)[1, 0] == 0.0
+    assert residual.reshape(3, 1)[2, 0] == 0.0
