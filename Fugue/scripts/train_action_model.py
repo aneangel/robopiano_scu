@@ -26,7 +26,7 @@ from fugue.data import (  # noqa: E402
     SampleConfig,
     fit_normalization_stats,
     validate_demo_split,
-    write_song_audit,
+    write_dataset_audit,
 )
 from fugue.models import ModelConfig, build_model  # noqa: E402
 from fugue.plots import plot_per_dim_mse, plot_training_curves  # noqa: E402
@@ -57,14 +57,15 @@ def main() -> None:
     config = _load_config(args.config)
     config = apply_wandb_cli_overrides(config, args)
     dataset_cfg = dict(config.get("dataset", {}))
-    song_key = str(args.song_key or dataset_cfg.get("song_key") or DEFAULT_SONG_KEY)
+    song_keys = _dataset_song_keys(dataset_cfg, override=args.song_key)
+    song_key = str(song_keys[0])
     run_root = Path(args.output_root) if args.output_root else _default_run_root()
     dataset_artifact_root = Path(args.dataset_artifact_root) if args.dataset_artifact_root else run_root / "dataset"
     dataset_artifact_root.mkdir(parents=True, exist_ok=True)
     _ensure_dataset_artifacts(
         dataset_root=args.rp1m_root,
         artifact_root=dataset_artifact_root,
-        song_key=song_key,
+        song_keys=song_keys,
         dataset_cfg=dataset_cfg,
     )
     if args.alignment_sweep:
@@ -78,6 +79,7 @@ def main() -> None:
                 dataset_artifact_root=dataset_artifact_root,
                 output_root=run_dir,
                 song_key=song_key,
+                song_keys=song_keys,
                 delta=delta,
             )
             rows.append({"delta": delta, **summary})
@@ -93,6 +95,7 @@ def main() -> None:
             dataset_artifact_root=dataset_artifact_root,
             output_root=run_root,
             song_key=song_key,
+            song_keys=song_keys,
             delta=delta,
         )
 
@@ -105,6 +108,7 @@ def _train_one(
     dataset_artifact_root: Path,
     output_root: Path,
     song_key: str,
+    song_keys: list[str],
     delta: int,
 ) -> dict[str, Any]:
     output_root.mkdir(parents=True, exist_ok=True)
@@ -121,6 +125,11 @@ def _train_one(
         training_cfg = replace(training_cfg, device=str(args.device))
     dataset_cfg = dict(config.get("dataset", {}))
     dt = float(dataset_cfg.get("dt", stats.dt))
+    max_train_demos = args.max_train_demos if args.max_train_demos is not None else dataset_cfg.get("max_train_demos")
+    max_val_demos = args.max_val_demos if args.max_val_demos is not None else dataset_cfg.get("max_val_demos")
+    max_train_demos_per_song = dataset_cfg.get("max_train_demos_per_song")
+    max_val_demos_per_song = dataset_cfg.get("max_val_demos_per_song")
+    augmentation_seed = int(dataset_cfg.get("augmentation_seed", dataset_cfg.get("split_seed", 0)))
     train_dataset = FugueActionDataset(
         dataset_root=dataset_root,
         manifest=manifest,
@@ -129,7 +138,10 @@ def _train_one(
         split="train",
         sample_config=sample_config,
         dt=dt,
-        max_demos=args.max_train_demos,
+        max_demos=None if max_train_demos is None else int(max_train_demos),
+        max_demos_per_song=None if max_train_demos_per_song is None else int(max_train_demos_per_song),
+        augment=True,
+        augmentation_seed=augmentation_seed,
     )
     val_dataset = FugueActionDataset(
         dataset_root=dataset_root,
@@ -139,7 +151,8 @@ def _train_one(
         split="val",
         sample_config=sample_config,
         dt=dt,
-        max_demos=args.max_val_demos,
+        max_demos=None if max_val_demos is None else int(max_val_demos),
+        max_demos_per_song=None if max_val_demos_per_song is None else int(max_val_demos_per_song),
     )
     train_loader = DataLoader(
         train_dataset,
@@ -165,6 +178,14 @@ def _train_one(
         "dataset_root": str(dataset_root),
         "dataset_artifact_root": str(dataset_artifact_root),
         "song_key": str(song_key),
+        "song_keys": [str(value) for value in song_keys],
+        "num_songs": int(len(song_keys)),
+        "max_train_demos": None if max_train_demos is None else int(max_train_demos),
+        "max_val_demos": None if max_val_demos is None else int(max_val_demos),
+        "max_train_demos_per_song": (
+            None if max_train_demos_per_song is None else int(max_train_demos_per_song)
+        ),
+        "max_val_demos_per_song": None if max_val_demos_per_song is None else int(max_val_demos_per_song),
         "dt": float(dt),
         "sample_config": sample_config.to_dict(),
         "model_config": asdict(model_cfg),
@@ -192,7 +213,7 @@ def _train_one(
         run_name=str(args.wandb_run_name or _wandb_run_name(output_root, sample_config)),
         config_payload=checkpoint_payload,
         job_type="train",
-        tags=["fugue", sample_config.feature_mode, f"delta_{delta}", song_key],
+        tags=["fugue", sample_config.feature_mode, f"delta_{delta}", f"num_songs_{len(song_keys)}"],
     )
     try:
         result = fit_model(
@@ -229,20 +250,21 @@ def _ensure_dataset_artifacts(
     *,
     dataset_root: str,
     artifact_root: Path,
-    song_key: str,
+    song_keys: list[str],
     dataset_cfg: dict[str, Any],
 ) -> None:
     manifest_path = artifact_root / "manifest.csv"
     summary_path = artifact_root / "dataset_summary.json"
     if not manifest_path.exists() or not summary_path.exists():
-        write_song_audit(
+        write_dataset_audit(
             dataset_root=dataset_root,
             output_root=artifact_root,
-            song_key=song_key,
+            song_keys=song_keys,
             train_frac=float(dataset_cfg.get("train_frac", 0.70)),
             val_frac=float(dataset_cfg.get("val_frac", 0.15)),
             test_frac=float(dataset_cfg.get("test_frac", 0.15)),
             seed=int(dataset_cfg.get("split_seed", 7)),
+            split_by_song=bool(dataset_cfg.get("split_by_song", False)),
         )
     stats_path = artifact_root / "normalization.json"
     if not stats_path.exists():
@@ -250,10 +272,36 @@ def _ensure_dataset_artifacts(
         stats = fit_normalization_stats(
             dataset_root=dataset_root,
             manifest=manifest,
-            song_key=song_key,
+            song_key=str(song_keys[0]),
             dt=float(dataset_cfg.get("dt", 0.05)),
+            max_demos=(
+                None
+                if dataset_cfg.get("normalization_max_demos") is None
+                else int(dataset_cfg.get("normalization_max_demos"))
+            ),
+            max_demos_per_song=(
+                None
+                if dataset_cfg.get("normalization_max_demos_per_song", dataset_cfg.get("max_train_demos_per_song"))
+                is None
+                else int(dataset_cfg.get("normalization_max_demos_per_song", dataset_cfg.get("max_train_demos_per_song")))
+            ),
         )
         stats.save(stats_path)
+
+
+def _dataset_song_keys(dataset_cfg: dict[str, Any], *, override: str | None) -> list[str]:
+    if override:
+        return [str(override)]
+    raw = dataset_cfg.get("song_keys")
+    if raw is None:
+        return [str(dataset_cfg.get("song_key") or DEFAULT_SONG_KEY)]
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",") if part.strip()]
+    else:
+        values = [str(value).strip() for value in raw if str(value).strip()]
+    if not values:
+        raise ValueError("dataset.song_keys was provided but empty")
+    return values
 
 
 def _load_config(path: str | Path) -> dict[str, Any]:

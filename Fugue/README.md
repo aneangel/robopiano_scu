@@ -152,6 +152,8 @@ Available later-model configs:
 - `model_d_tcn.yaml`: causal temporal convolution, single-step action prediction.
 - `model_e_action_chunk_transformer.yaml`: causal transformer, `C=4` action chunks.
 - `model_e_chunk_history.yaml`: flattened history MLP, `C=4` action chunks.
+- `model_e_multisong_action_chunk_transformer.yaml`: causal transformer trained across
+  multiple songs with validation/test songs held out by song key.
 
 ## Planner-Next Controller
 
@@ -180,6 +182,27 @@ python Fugue/scripts/train_action_model.py \
   --config Fugue/configs/model_f_planner_next.yaml \
   --rp1m-root "$RP1M_300_ROOT" \
   --output-root "$OUTPUT_ROOT/model_f_planner_next" \
+  --delta 0
+```
+
+For held-out-song generalization, use:
+
+```bash
+python Fugue/scripts/train_action_model.py \
+  --config Fugue/configs/model_f_multisong_planner_window.yaml \
+  --rp1m-root "$RP1M_300_ROOT" \
+  --output-root "$OUTPUT_ROOT/model_f_multisong_planner_window" \
+  --delta 0
+```
+
+The transformer planner-following variant uses the same held-out-song split but tokenizes
+history and planner targets instead of flattening them:
+
+```bash
+python Fugue/scripts/train_action_model.py \
+  --config Fugue/configs/model_f_multisong_planner_transformer.yaml \
+  --rp1m-root "$RP1M_300_ROOT" \
+  --output-root "$OUTPUT_ROOT/model_f_multisong_planner_transformer" \
   --delta 0
 ```
 

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "allegro-high-frequency-alignment"
+version = "0.1.0"
+description = "Allegro: 200 Hz online residual alignment controller for Fugue RoboPianist rollouts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jack Landers"}, {name = "OpenAI Codex"}]
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.2",
+]
+
+[project.optional-dependencies]
+fugue = [
+  "pandas>=2.0",
+  "zarr>=2.16,<3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["src", "scripts", "..", "../Fugue/src"]
+
+[tool.ruff]
+line-length = 100

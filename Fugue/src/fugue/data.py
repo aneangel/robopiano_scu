@@ -47,6 +47,8 @@ class SampleConfig:
     include_future_qvel: bool = False
     oracle_future_hand_state: bool = False
     press_window: int = 2
+    current_q_noise_std: float = 0.0
+    current_qvel_noise_std: float = 0.0
 
     @classmethod
     def from_dict(cls, values: dict[str, Any] | None) -> "SampleConfig":
@@ -57,7 +59,14 @@ class SampleConfig:
         return asdict(self)
 
     def validate(self) -> None:
-        if self.feature_mode not in {"stateless", "history", "inverse", "sequence", "planner_next"}:
+        if self.feature_mode not in {
+            "stateless",
+            "history",
+            "inverse",
+            "sequence",
+            "planner_next",
+            "planner_sequence",
+        }:
             raise ValueError(f"Unsupported feature_mode: {self.feature_mode}")
         if self.history < 1:
             raise ValueError("history must be >= 1")
@@ -69,8 +78,12 @@ class SampleConfig:
             raise ValueError("chunk_horizon must be >= 1")
         if self.press_window < 0:
             raise ValueError("press_window must be >= 0")
-        if self.feature_mode == "planner_next" and not self.include_qpos:
-            raise ValueError("planner_next requires include_qpos=true")
+        if self.current_q_noise_std < 0.0:
+            raise ValueError("current_q_noise_std must be >= 0")
+        if self.current_qvel_noise_std < 0.0:
+            raise ValueError("current_qvel_noise_std must be >= 0")
+        if self.feature_mode in {"planner_next", "planner_sequence"} and not self.include_qpos:
+            raise ValueError(f"{self.feature_mode} requires include_qpos=true")
 
     def feature_dim(
         self,
@@ -99,6 +112,15 @@ class SampleConfig:
             return dim
         if self.feature_mode == "sequence":
             token_dim = current_dim + 2
+            if self.include_action_history:
+                token_dim += action_dim
+            if self.include_goals:
+                token_dim += goal_dim
+            return token_dim
+        if self.feature_mode == "planner_sequence":
+            token_dim = current_dim + 2 * q_dim + 3
+            if self.include_future_qvel:
+                token_dim += q_dim
             if self.include_action_history:
                 token_dim += action_dim
             if self.include_goals:
@@ -285,20 +307,115 @@ def build_demo_manifest(
     return manifest
 
 
+def build_multi_song_manifest(
+    *,
+    summaries: list[dict[str, Any]],
+    train_frac: float = 0.70,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    seed: int = 7,
+    split_by_song: bool = False,
+) -> pd.DataFrame:
+    if not summaries:
+        raise ValueError("summaries must contain at least one song")
+    if len(summaries) == 1:
+        return build_demo_manifest(
+            summary=summaries[0],
+            train_frac=train_frac,
+            val_frac=val_frac,
+            test_frac=test_frac,
+            seed=seed,
+        )
+    _validate_split_fractions(train_frac, val_frac, test_frac)
+    rows = []
+    song_splits: dict[str, str] = {}
+    if split_by_song:
+        labels = _assign_demo_splits(len(summaries), train_frac=train_frac, val_frac=val_frac, seed=seed)
+        for summary, label in zip(summaries, labels):
+            song_splits[str(summary["song_key"])] = str(label)
+    for song_idx, summary in enumerate(summaries):
+        if split_by_song:
+            manifest = build_demo_manifest(
+                summary=summary,
+                train_frac=1.0,
+                val_frac=0.0,
+                test_frac=0.0,
+                seed=seed,
+            )
+            manifest["split"] = song_splits[str(summary["song_key"])]
+        else:
+            manifest = build_demo_manifest(
+                summary=summary,
+                train_frac=train_frac,
+                val_frac=val_frac,
+                test_frac=test_frac,
+                seed=seed + song_idx,
+            )
+        rows.append(manifest)
+    combined = pd.concat(rows, ignore_index=True)
+    validate_demo_split(combined)
+    return combined
+
+
 def validate_demo_split(manifest: pd.DataFrame) -> dict[str, int]:
     required = {"demo_id", "split"}
     missing = sorted(required - set(manifest.columns))
     if missing:
         raise ValueError(f"Manifest missing required columns: {missing}")
-    duplicate_membership = manifest.groupby("demo_id")["split"].nunique()
+    id_cols = ["song_key", "demo_id"] if "song_key" in manifest.columns else ["demo_id"]
+    duplicate_membership = manifest.groupby(id_cols)["split"].nunique()
     leaked = duplicate_membership[duplicate_membership > 1]
     if not leaked.empty:
-        raise ValueError(f"Demo split leakage: demo ids appear in multiple splits: {list(leaked.index[:5])}")
-    duplicated_rows = manifest.duplicated(subset=["demo_id"], keep=False)
+        raise ValueError(f"Demo split leakage: demos appear in multiple splits: {list(leaked.index[:5])}")
+    duplicated_rows = manifest.duplicated(subset=id_cols, keep=False)
     if bool(duplicated_rows.any()):
-        values = manifest.loc[duplicated_rows, "demo_id"].tolist()[:5]
-        raise ValueError(f"Duplicate demo_id rows in manifest: {values}")
+        values = manifest.loc[duplicated_rows, id_cols].head(5).to_dict(orient="records")
+        raise ValueError(f"Duplicate demo rows in manifest: {values}")
     return {str(key): int(value) for key, value in manifest["split"].value_counts().to_dict().items()}
+
+
+def write_dataset_audit(
+    *,
+    dataset_root: str | Path,
+    output_root: str | Path,
+    song_keys: list[str],
+    train_frac: float = 0.70,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    seed: int = 7,
+    split_by_song: bool = False,
+) -> dict[str, Path]:
+    if not song_keys:
+        raise ValueError("song_keys must contain at least one song")
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    summaries = [audit_song(dataset_root, song_key=str(song_key)) for song_key in song_keys]
+    manifest = build_multi_song_manifest(
+        summaries=summaries,
+        train_frac=train_frac,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+        split_by_song=split_by_song,
+    )
+    split_counts = validate_demo_split(manifest)
+    summary = {
+        "dataset_root": str(Path(dataset_root)),
+        "song_keys": [str(song_key) for song_key in song_keys],
+        "num_songs": int(len(song_keys)),
+        "split_seed": int(seed),
+        "split_by_song": bool(split_by_song),
+        "split_fractions": {"train": train_frac, "val": val_frac, "test": test_frac},
+        "split_counts": split_counts,
+        "songs": summaries,
+    }
+    manifest_path = output_root / "manifest.csv"
+    splits_path = output_root / "splits.csv"
+    summary_path = output_root / "dataset_summary.json"
+    manifest.to_csv(manifest_path, index=False)
+    manifest[["song_key", "demo_id", "split"]].to_csv(splits_path, index=False)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    return {"manifest": manifest_path, "splits": splits_path, "summary": summary_path}
 
 
 def write_song_audit(
@@ -344,25 +461,38 @@ def fit_normalization_stats(
     song_key: str = DEFAULT_SONG_KEY,
     dt: float = DEFAULT_DT,
     split: str = "train",
+    max_demos: int | None = None,
+    max_demos_per_song: int | None = None,
 ) -> NormalizationStats:
     validate_demo_split(manifest)
-    rows = manifest[manifest["split"].astype(str) == split]
+    rows = manifest[manifest["split"].astype(str) == split].copy()
     if rows.empty:
         raise ValueError(f"No rows found for split={split!r}")
+    sort_cols = ["song_key", "demo_id"] if "song_key" in rows.columns else ["demo_id"]
+    rows = rows.sort_values(sort_cols)
+    if max_demos_per_song is not None:
+        if "song_key" in rows.columns:
+            rows = rows.groupby("song_key", group_keys=False).head(int(max_demos_per_song))
+        else:
+            rows = rows.head(int(max_demos_per_song))
+    if max_demos is not None:
+        rows = rows.head(int(max_demos))
     root = open_zarr_root(dataset_root)
-    group = root[song_key]
     q_acc = _StatsAccumulator()
     qvel_acc = _StatsAccumulator()
     action_acc = _StatsAccumulator()
     goal_acc = _StatsAccumulator()
-    fingertip_acc = _StatsAccumulator() if "hand_fingertips" in group else None
-    for demo_id in rows["demo_id"].astype(int).tolist():
+    fingertip_acc = _StatsAccumulator()
+    for _, row in rows.iterrows():
+        row_song_key = str(row["song_key"]) if "song_key" in row else str(song_key)
+        demo_id = int(row["demo_id"])
+        group = root[row_song_key]
         episode = load_demo_arrays(group, demo_id=demo_id, dt=dt)
         q_acc.update(episode["q"])
         qvel_acc.update(episode["qvel"])
         action_acc.update(episode["actions"])
         goal_acc.update(episode["goals"])
-        if fingertip_acc is not None and episode.get("fingertips") is not None:
+        if episode.get("fingertips") is not None:
             fingertip_acc.update(episode["fingertips"])
     q_mean, q_std = q_acc.finalize()
     qvel_mean, qvel_std = qvel_acc.finalize()
@@ -372,7 +502,7 @@ def fit_normalization_stats(
     goal_std = np.sqrt(goal_var + 1e-6).astype(np.float32)
     fingertip_mean = None
     fingertip_std = None
-    if fingertip_acc is not None and fingertip_acc.count > 0:
+    if fingertip_acc.count > 0:
         ft_mean, ft_std = fingertip_acc.finalize()
         fingertip_mean = ft_mean.tolist()
         fingertip_std = ft_std.tolist()
@@ -476,6 +606,9 @@ class FugueActionDataset(Dataset):
         sample_config: SampleConfig | None = None,
         dt: float = DEFAULT_DT,
         max_demos: int | None = None,
+        max_demos_per_song: int | None = None,
+        augment: bool = False,
+        augmentation_seed: int | None = None,
     ) -> None:
         self.dataset_root = Path(dataset_root)
         self.song_key = str(song_key)
@@ -483,31 +616,49 @@ class FugueActionDataset(Dataset):
         self.sample_config = sample_config or SampleConfig()
         self.sample_config.validate()
         self.dt = float(dt)
+        self.split = str(split)
+        self.augment = bool(augment)
+        self.rng = np.random.default_rng(augmentation_seed)
         self.manifest = pd.read_csv(manifest) if isinstance(manifest, (str, Path)) else manifest.copy()
         validate_demo_split(self.manifest)
         rows = self.manifest[self.manifest["split"].astype(str) == str(split)].copy()
+        sort_cols = ["song_key", "demo_id"] if "song_key" in rows.columns else ["demo_id"]
+        rows = rows.sort_values(sort_cols)
+        if max_demos_per_song is not None:
+            if "song_key" in rows.columns:
+                rows = rows.groupby("song_key", group_keys=False).head(int(max_demos_per_song))
+            else:
+                rows = rows.head(int(max_demos_per_song))
         if max_demos is not None:
-            rows = rows.sort_values("demo_id").head(int(max_demos))
+            rows = rows.head(int(max_demos))
         if rows.empty:
             raise ValueError(f"No demos found for split={split!r}")
         self.demo_ids = rows["demo_id"].astype(int).tolist()
+        self.song_keys = (
+            rows["song_key"].astype(str).tolist()
+            if "song_key" in rows.columns
+            else [self.song_key for _ in self.demo_ids]
+        )
+        unique_song_keys = sorted(set(self.song_keys))
+        self.song_to_index = {song: idx for idx, song in enumerate(unique_song_keys)}
         root = open_zarr_root(self.dataset_root)
-        group = root[self.song_key]
-        self.episodes: dict[int, dict[str, np.ndarray | None]] = {}
-        self.raw_episodes: dict[int, dict[str, np.ndarray | None]] = {}
-        self.press_masks: dict[int, np.ndarray] = {}
-        self.index: list[tuple[int, int]] = []
-        for demo_id in self.demo_ids:
+        self.episodes: dict[tuple[str, int], dict[str, np.ndarray | None]] = {}
+        self.raw_episodes: dict[tuple[str, int], dict[str, np.ndarray | None]] = {}
+        self.press_masks: dict[tuple[str, int], np.ndarray] = {}
+        self.index: list[tuple[str, int, int]] = []
+        for song, demo_id in zip(self.song_keys, self.demo_ids):
+            group = root[str(song)]
             raw = load_demo_arrays(group, demo_id=demo_id, dt=self.dt)
             norm = normalize_episode(raw, self.stats)
-            self.raw_episodes[demo_id] = raw
-            self.episodes[demo_id] = norm
-            self.press_masks[demo_id] = compute_press_mask(raw["goals"], window=self.sample_config.press_window)
+            key = (str(song), int(demo_id))
+            self.raw_episodes[key] = raw
+            self.episodes[key] = norm
+            self.press_masks[key] = compute_press_mask(raw["goals"], window=self.sample_config.press_window)
             for t in valid_timesteps(norm["actions"].shape[0], self.sample_config):
-                self.index.append((demo_id, t))
+                self.index.append((str(song), int(demo_id), t))
         if not self.index:
             raise ValueError(f"No valid samples for split={split!r} with config={self.sample_config}")
-        sample_episode = self.episodes[self.demo_ids[0]]
+        sample_episode = self.episodes[(self.song_keys[0], self.demo_ids[0])]
         self.q_dim = int(sample_episode["q"].shape[-1])
         self.action_dim = int(sample_episode["actions"].shape[-1])
         self.goal_dim = int(sample_episode["goals"].shape[-1])
@@ -524,34 +675,111 @@ class FugueActionDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        demo_id, t = self.index[idx]
-        episode = self.episodes[demo_id]
+        song_key, demo_id, t = self.index[idx]
+        episode = self.episodes[(song_key, demo_id)]
         target_start = int(t + self.sample_config.delta)
         target_end = target_start + int(self.sample_config.chunk_horizon)
-        feature = build_feature_vector(episode, t=t, config=self.sample_config)
+        if self.augment:
+            feature = build_augmented_planner_feature(episode, t=t, config=self.sample_config, rng=self.rng)
+        else:
+            feature = build_feature_vector(episode, t=t, config=self.sample_config)
         target = np.asarray(episode["actions"][target_start:target_end], dtype=np.float32)
-        press = np.asarray(self.press_masks[demo_id][target_start:target_end], dtype=np.float32)
+        press = np.asarray(self.press_masks[(song_key, demo_id)][target_start:target_end], dtype=np.float32)
         return {
             "features": torch.from_numpy(feature),
             "actions": torch.from_numpy(target),
             "press_weight": torch.from_numpy(1.0 + 2.0 * press),
             "demo_id": torch.tensor(demo_id, dtype=torch.long),
+            "song_index": torch.tensor(self.song_to_index[str(song_key)], dtype=torch.long),
             "t": torch.tensor(t, dtype=torch.long),
         }
 
 
 def valid_timesteps(length: int, config: SampleConfig) -> range:
     start = 0
-    if config.feature_mode in {"history", "sequence"}:
+    if config.feature_mode in {"history", "sequence", "planner_sequence"}:
         start = max(start, int(config.history) - 1)
     start = max(start, -int(config.delta))
     stop = int(length) - int(config.delta) - int(config.chunk_horizon) + 1
-    if config.feature_mode == "planner_next":
+    if config.feature_mode in {"planner_next", "planner_sequence"}:
         stop = min(stop, int(length) - int(config.lookahead) - int(config.goal_horizon) + 1)
     stop = min(stop, int(length))
     if stop <= start:
         return range(0, 0)
     return range(start, stop)
+
+
+def build_augmented_planner_feature(
+    episode: dict[str, np.ndarray | None],
+    *,
+    t: int,
+    config: SampleConfig,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    # Training-only path-following augmentation: perturb current state in
+    # normalized units while keeping the planner target trajectory fixed.
+    if config.feature_mode not in {"planner_next", "planner_sequence"}:
+        return build_feature_vector(episode, t=t, config=config)
+    q_noise = float(config.current_q_noise_std)
+    qvel_noise = float(config.current_qvel_noise_std)
+    if q_noise <= 0.0 and qvel_noise <= 0.0:
+        return build_feature_vector(episode, t=t, config=config)
+
+    def add_noise(value: np.ndarray, std: float) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float32).copy()
+        if std > 0.0:
+            arr += rng.normal(0.0, std, size=arr.shape).astype(np.float32)
+        return arr.astype(np.float32)
+
+    total = len(episode["q"])
+    if config.feature_mode == "planner_next":
+        current_q = add_noise(episode["q"][t], q_noise)
+        current_qvel = add_noise(episode["qvel"][t], qvel_noise) if config.include_qvel else None
+        current_fingertips = None
+        if config.include_fingertips:
+            fingertips = episode.get("fingertips")
+            current_fingertips = None if fingertips is None else np.asarray(fingertips[t], dtype=np.float32)
+        return build_planner_next_feature(
+            current_q_norm=current_q,
+            current_qvel_norm=current_qvel,
+            target_q_norm=_window(episode["q"], start=int(t) + int(config.lookahead), length=config.goal_horizon),
+            config=config,
+            target_qvel_norm=_window(episode["qvel"], start=int(t) + int(config.lookahead), length=config.goal_horizon)
+            if config.include_future_qvel
+            else None,
+            action_history_norm=_previous_action_history(episode["actions"], t=t, history=config.history)
+            if config.include_action_history
+            else None,
+            goals_norm=_window(episode["goals"], start=t, length=config.goal_horizon) if config.include_goals else None,
+            current_fingertips_norm=current_fingertips,
+        )
+
+    history_indices = _clamped_indices(t - config.history + 1, config.history, total)
+    q_hist = add_noise(episode["q"][history_indices], q_noise)
+    qvel_hist = add_noise(episode["qvel"][history_indices], qvel_noise) if config.include_qvel else None
+    target_indices = _clamped_indices(int(t) + int(config.lookahead), config.goal_horizon, total)
+    goal_indices = _clamped_indices(t, config.goal_horizon, total)
+    action_hist = None
+    if config.include_action_history:
+        action_hist = _previous_action_history(episode["actions"], t=t, history=config.history).reshape(
+            int(config.history), -1
+        )
+    fingertips_hist = None
+    if config.include_fingertips:
+        fingertips = episode.get("fingertips")
+        fingertips_hist = None if fingertips is None else np.asarray(fingertips[history_indices], dtype=np.float32)
+    return build_planner_sequence_feature(
+        current_q_history_norm=q_hist,
+        current_qvel_history_norm=qvel_hist,
+        target_q_norm=np.asarray(episode["q"][target_indices], dtype=np.float32),
+        config=config,
+        target_qvel_norm=np.asarray(episode["qvel"][target_indices], dtype=np.float32)
+        if config.include_future_qvel
+        else None,
+        action_history_norm=action_hist,
+        goals_norm=np.asarray(episode["goals"][goal_indices], dtype=np.float32) if config.include_goals else None,
+        current_fingertips_history_norm=fingertips_hist,
+    )
 
 
 def build_feature_vector(episode: dict[str, np.ndarray | None], *, t: int, config: SampleConfig) -> np.ndarray:
@@ -592,6 +820,8 @@ def build_feature_vector(episode: dict[str, np.ndarray | None], *, t: int, confi
             parts.append(_window(episode["goals"], start=t, length=config.goal_horizon).reshape(-1))
     elif config.feature_mode == "sequence":
         return _sequence_feature_tokens(episode, t=t, config=config)
+    elif config.feature_mode == "planner_sequence":
+        return _planner_sequence_feature_tokens(episode, t=t, config=config)
     else:
         raise ValueError(f"Unsupported feature_mode: {config.feature_mode}")
     return np.concatenate([np.asarray(part, dtype=np.float32).reshape(-1) for part in parts]).astype(np.float32)
@@ -656,6 +886,119 @@ def build_planner_next_feature(
     return np.concatenate(parts, axis=0).astype(np.float32)
 
 
+def build_planner_sequence_feature(
+    *,
+    current_q_history_norm: np.ndarray,
+    current_qvel_history_norm: np.ndarray | None,
+    target_q_norm: np.ndarray,
+    config: SampleConfig,
+    target_qvel_norm: np.ndarray | None = None,
+    action_history_norm: np.ndarray | None = None,
+    goals_norm: np.ndarray | None = None,
+    current_fingertips_history_norm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build tokenized deployable planner-following features.
+
+    The returned tensor has shape ``[history + goal_horizon, token_dim]``.
+    History tokens carry simulated state/action history; planner tokens carry
+    the future target hand trajectory, target error, optional target velocity,
+    and score goals.
+    """
+    config.validate()
+    if config.feature_mode != "planner_sequence":
+        raise ValueError(f"Expected feature_mode='planner_sequence', got {config.feature_mode!r}")
+    q_hist = _as_history_window(
+        current_q_history_norm,
+        history=int(config.history),
+        dim=HAND_QPOS_DIM,
+        name="current_q_history_norm",
+    )
+    q_dim = int(q_hist.shape[-1])
+    qvel_hist = None
+    if config.include_qvel:
+        if current_qvel_history_norm is None:
+            raise ValueError("planner_sequence include_qvel=true requires current_qvel_history_norm")
+        qvel_hist = _as_history_window(
+            current_qvel_history_norm,
+            history=int(config.history),
+            dim=q_dim,
+            name="current_qvel_history_norm",
+        )
+    target_q = _as_planner_window(target_q_norm, horizon=int(config.goal_horizon), dim=q_dim, name="target_q_norm")
+    target_qvel = None
+    if config.include_future_qvel:
+        if target_qvel_norm is None:
+            raise ValueError("planner_sequence include_future_qvel=true requires target_qvel_norm")
+        target_qvel = _as_planner_window(
+            target_qvel_norm,
+            horizon=int(config.goal_horizon),
+            dim=q_dim,
+            name="target_qvel_norm",
+        )
+    action_hist = None
+    if config.include_action_history:
+        if action_history_norm is None:
+            raise ValueError("planner_sequence include_action_history=true requires action_history_norm")
+        action_hist = _as_history_window(
+            action_history_norm,
+            history=int(config.history),
+            dim=ACTION_DIM,
+            name="action_history_norm",
+        )
+    goals = None
+    if config.include_goals:
+        if goals_norm is None:
+            raise ValueError("planner_sequence include_goals=true requires goals_norm")
+        goals = _as_planner_window(goals_norm, horizon=int(config.goal_horizon), dim=GOAL_DIM, name="goals_norm")
+    fingertips_hist = None
+    if config.include_fingertips:
+        if current_fingertips_history_norm is None:
+            fingertips_hist = np.zeros((int(config.history), FINGERTIP_DIM), dtype=np.float32)
+        else:
+            fingertips_hist = _as_history_window(
+                current_fingertips_history_norm,
+                history=int(config.history),
+                dim=FINGERTIP_DIM,
+                name="current_fingertips_history_norm",
+            )
+    tokens = []
+    for idx in range(int(config.history)):
+        tokens.append(
+            _planner_sequence_token_from_arrays(
+                config=config,
+                q=q_hist[idx] if config.include_qpos else None,
+                qvel=None if qvel_hist is None else qvel_hist[idx],
+                action=None if action_hist is None else action_hist[idx],
+                target_q=None,
+                target_qvel=None,
+                target_error=None,
+                goals=None,
+                fingertip=None if fingertips_hist is None else fingertips_hist[idx],
+                token_type=(1.0, 0.0, 0.0),
+                q_dim=q_dim,
+            )
+        )
+    current_q = q_hist[-1]
+    for idx in range(int(config.goal_horizon)):
+        target = target_q[idx]
+        tokens.append(
+            _planner_sequence_token_from_arrays(
+                config=config,
+                q=None,
+                qvel=None,
+                action=None,
+                target_q=target,
+                target_qvel=None if target_qvel is None else target_qvel[idx],
+                target_error=(target - current_q).astype(np.float32),
+                goals=None if goals is None else goals[idx],
+                fingertip=None,
+                token_type=(0.0, 1.0, 0.0),
+                q_dim=q_dim,
+            )
+        )
+    return np.stack(tokens, axis=0).astype(np.float32)
+
+
 def _as_planner_window(value: np.ndarray, *, horizon: int, dim: int, name: str) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float32)
     if arr.ndim == 1:
@@ -668,6 +1011,22 @@ def _as_planner_window(value: np.ndarray, *, horizon: int, dim: int, name: str) 
         raise ValueError(f"{name} must have shape [{horizon}, {dim}], got {arr.shape}")
     if arr.shape != (int(horizon), int(dim)):
         raise ValueError(f"{name} must have shape [{horizon}, {dim}], got {arr.shape}")
+    return arr.astype(np.float32)
+
+
+def _as_history_window(value: np.ndarray, *, history: int, dim: int, name: str) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim == 1:
+        expected = int(history) * int(dim)
+        if arr.size != expected:
+            raise ValueError(f"{name} must have {expected} values, got {arr.size}")
+        arr = arr.reshape(int(history), int(dim))
+    elif arr.ndim == 2:
+        arr = arr.reshape(arr.shape[0], arr.shape[1])
+    else:
+        raise ValueError(f"{name} must have shape [{history}, {dim}], got {arr.shape}")
+    if arr.shape != (int(history), int(dim)):
+        raise ValueError(f"{name} must have shape [{history}, {dim}], got {arr.shape}")
     return arr.astype(np.float32)
 
 
@@ -703,6 +1062,118 @@ def _sequence_feature_tokens(
         for idx in _clamped_indices(t, config.goal_horizon, total):
             tokens.append(_sequence_token(episode, t=int(idx), config=config, token_type=(0.0, 1.0), future_goal=True))
     return np.stack(tokens, axis=0).astype(np.float32)
+
+
+def _planner_sequence_feature_tokens(
+    episode: dict[str, np.ndarray | None],
+    *,
+    t: int,
+    config: SampleConfig,
+) -> np.ndarray:
+    tokens = []
+    total = len(episode["q"])
+    q_dim = int(episode["q"].shape[-1])
+    history_indices = _clamped_indices(t - config.history + 1, config.history, total)
+    current_q = np.asarray(episode["q"][t], dtype=np.float32).reshape(-1)
+    for idx in history_indices:
+        action = None
+        if config.include_action_history:
+            action = np.zeros((int(episode["actions"].shape[-1]),), dtype=np.float32)
+            if int(idx) > 0:
+                action = np.asarray(episode["actions"][int(idx) - 1], dtype=np.float32).reshape(-1)
+        fingertip = None
+        if config.include_fingertips:
+            fingertips = episode.get("fingertips")
+            fingertip = (
+                np.zeros((FINGERTIP_DIM,), dtype=np.float32)
+                if fingertips is None
+                else np.asarray(fingertips[int(idx)], dtype=np.float32).reshape(-1)
+            )
+        tokens.append(
+            _planner_sequence_token_from_arrays(
+                config=config,
+                q=np.asarray(episode["q"][int(idx)], dtype=np.float32).reshape(-1),
+                qvel=np.asarray(episode["qvel"][int(idx)], dtype=np.float32).reshape(-1)
+                if config.include_qvel
+                else None,
+                action=action,
+                target_q=None,
+                target_qvel=None,
+                target_error=None,
+                goals=np.asarray(episode["goals"][int(idx)], dtype=np.float32).reshape(-1)
+                if config.include_goals
+                else None,
+                fingertip=fingertip,
+                token_type=(1.0, 0.0, 0.0),
+                q_dim=q_dim,
+            )
+        )
+    for goal_offset in range(int(config.goal_horizon)):
+        target_idx = int(np.clip(int(t) + int(config.lookahead) + goal_offset, 0, total - 1))
+        goal_idx = int(np.clip(int(t) + goal_offset, 0, total - 1))
+        target_q = np.asarray(episode["q"][target_idx], dtype=np.float32).reshape(-1)
+        tokens.append(
+            _planner_sequence_token_from_arrays(
+                config=config,
+                q=None,
+                qvel=None,
+                action=None,
+                target_q=target_q,
+                target_qvel=np.asarray(episode["qvel"][target_idx], dtype=np.float32).reshape(-1)
+                if config.include_future_qvel
+                else None,
+                target_error=(target_q - current_q).astype(np.float32),
+                goals=np.asarray(episode["goals"][goal_idx], dtype=np.float32).reshape(-1)
+                if config.include_goals
+                else None,
+                fingertip=None,
+                token_type=(0.0, 1.0, 0.0),
+                q_dim=q_dim,
+            )
+        )
+    return np.stack(tokens, axis=0).astype(np.float32)
+
+
+def _planner_sequence_token_from_arrays(
+    *,
+    config: SampleConfig,
+    q: np.ndarray | None,
+    qvel: np.ndarray | None,
+    action: np.ndarray | None,
+    target_q: np.ndarray | None,
+    target_qvel: np.ndarray | None,
+    target_error: np.ndarray | None,
+    goals: np.ndarray | None,
+    fingertip: np.ndarray | None,
+    token_type: tuple[float, float, float],
+    q_dim: int,
+) -> np.ndarray:
+    parts: list[np.ndarray] = []
+    if config.include_qpos:
+        parts.append(_value_or_zeros(q, q_dim))
+    if config.include_qvel:
+        parts.append(_value_or_zeros(qvel, q_dim))
+    if config.include_fingertips:
+        parts.append(_value_or_zeros(fingertip, FINGERTIP_DIM))
+    if config.include_action_history:
+        parts.append(_value_or_zeros(action, ACTION_DIM))
+    parts.append(_value_or_zeros(target_q, q_dim))
+    if config.include_future_qvel:
+        parts.append(_value_or_zeros(target_qvel, q_dim))
+    parts.append(_value_or_zeros(target_error, q_dim))
+    if config.include_goals:
+        parts.append(_value_or_zeros(goals, GOAL_DIM))
+    parts.append(np.asarray(token_type, dtype=np.float32))
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+def _value_or_zeros(value: np.ndarray | None, dim: int) -> np.ndarray:
+    if value is None:
+        return np.zeros((int(dim),), dtype=np.float32)
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.shape[0] != int(dim):
+        raise ValueError(f"Expected dimension {dim}, got {arr.shape[0]}")
+    return arr
 
 
 def _sequence_token(

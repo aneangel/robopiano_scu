@@ -179,10 +179,11 @@ def rollout_inverse_lookahead_with_robopianist(
         restore_info = pr._restore_initial_rp1m_state(
             env,
             hand_joints_t0=q_ref[0],
-            piano_state_t0=piano_ref[0] if piano_ref is not None and piano_ref.shape[0] > 0 else None,
+            piano_state_t0=None,
             key_threshold=0.5,
             zero_velocities=True,
         )
+        restore_info["reference_piano_state_policy"] = "scoring_only_not_simulator_input"
         task, physics, _piano = pr._locate_task_physics_piano(env)
         current_q = pr._capture_hand_qpos(task, physics)
         if current_q is None:

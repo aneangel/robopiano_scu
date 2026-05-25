@@ -11,7 +11,9 @@ from fugue.data import (
     SampleConfig,
     audit_song,
     build_planner_next_feature,
+    build_planner_sequence_feature,
     build_demo_manifest,
+    build_multi_song_manifest,
     compute_press_mask,
     finite_difference,
     fit_normalization_stats,
@@ -20,6 +22,7 @@ from fugue.data import (
 
 
 SONG_KEY = "RoboPianist-debug-TwinkleTwinkleLittleStar-v0_0"
+SECOND_SONG_KEY = "RoboPianist-debug-Scale-v0_0"
 
 
 def test_finite_difference_uses_centered_interior() -> None:
@@ -32,6 +35,29 @@ def test_demo_split_rejects_overlap() -> None:
     manifest = pd.DataFrame({"demo_id": [0, 0], "split": ["train", "test"]})
     with pytest.raises(ValueError, match="Demo split leakage"):
         validate_demo_split(manifest)
+
+
+def test_multi_song_manifest_allows_same_demo_ids_across_songs(tmp_path: Path) -> None:
+    root = _write_tiny_zarr(tmp_path, include_second_song=True)
+    summaries = [audit_song(root, SONG_KEY), audit_song(root, SECOND_SONG_KEY)]
+    manifest = build_multi_song_manifest(summaries=summaries, seed=3, split_by_song=True)
+    counts = validate_demo_split(manifest)
+    assert sum(counts.values()) == 12
+    assert set(manifest["song_key"]) == {SONG_KEY, SECOND_SONG_KEY}
+    stats = fit_normalization_stats(dataset_root=root, manifest=manifest, song_key=SONG_KEY, dt=0.05)
+    dataset = FugueActionDataset(
+        dataset_root=root,
+        manifest=manifest,
+        stats=stats,
+        song_key=SONG_KEY,
+        split="train",
+        sample_config=SampleConfig(feature_mode="history", history=2, include_qpos=True, include_qvel=True),
+        max_demos_per_song=1,
+    )
+    assert len(set(dataset.song_keys)) >= 1
+    sample = dataset[0]
+    assert sample["features"].shape == (184,)
+    assert sample["song_index"].ndim == 0
 
 
 def test_audit_manifest_and_dataset_shapes(tmp_path: Path) -> None:
@@ -112,6 +138,31 @@ def test_audit_manifest_and_dataset_shapes(tmp_path: Path) -> None:
     assert planner_sample["features"].shape == (184,)
     assert planner_sample["actions"].shape == (1, 39)
 
+    planner_sequence_cfg = SampleConfig(
+        feature_mode="planner_sequence",
+        history=3,
+        goal_horizon=4,
+        include_qpos=True,
+        include_qvel=True,
+        include_action_history=True,
+        include_goals=True,
+        include_future_qvel=True,
+        chunk_horizon=1,
+    )
+    planner_sequence = FugueActionDataset(
+        dataset_root=root,
+        manifest=manifest,
+        stats=stats,
+        song_key=SONG_KEY,
+        split="train",
+        sample_config=planner_sequence_cfg,
+    )
+    planner_sequence_sample = planner_sequence[0]
+    expected_planner_token_dim = 46 + 46 + 39 + 46 + 46 + 46 + 88 + 3
+    assert planner_sequence.feature_dim == expected_planner_token_dim
+    assert planner_sequence_sample["features"].shape == (7, expected_planner_token_dim)
+    assert planner_sequence_sample["actions"].shape == (1, 39)
+
 
 def test_planner_next_feature_builder_matches_expected_shape() -> None:
     cfg = SampleConfig(feature_mode="planner_next", include_qpos=True, include_qvel=True)
@@ -150,6 +201,36 @@ def test_planner_next_feature_builder_uses_full_target_window() -> None:
     np.testing.assert_allclose(feature[-3 * 46 :], 3.0)
 
 
+def test_planner_sequence_feature_builder_uses_history_and_target_tokens() -> None:
+    cfg = SampleConfig(
+        feature_mode="planner_sequence",
+        history=2,
+        goal_horizon=3,
+        include_qpos=True,
+        include_qvel=True,
+        include_action_history=True,
+        include_goals=True,
+        include_future_qvel=True,
+    )
+    feature = build_planner_sequence_feature(
+        current_q_history_norm=np.zeros((2, 46), dtype=np.float32),
+        current_qvel_history_norm=np.ones((2, 46), dtype=np.float32),
+        action_history_norm=np.ones((2, 39), dtype=np.float32) * 4.0,
+        target_q_norm=np.ones((3, 46), dtype=np.float32) * 2.0,
+        target_qvel_norm=np.ones((3, 46), dtype=np.float32) * 3.0,
+        goals_norm=np.ones((3, 88), dtype=np.float32) * 5.0,
+        config=cfg,
+    )
+    token_dim = 46 + 46 + 39 + 46 + 46 + 46 + 88 + 3
+    assert feature.shape == (5, token_dim)
+    np.testing.assert_allclose(feature[:2, -3:], [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    np.testing.assert_allclose(feature[2:, -3:], np.tile([0.0, 1.0, 0.0], (3, 1)))
+    target_start = 46 + 46 + 39
+    np.testing.assert_allclose(feature[2:, target_start : target_start + 46], 2.0)
+    error_start = target_start + 46 + 46
+    np.testing.assert_allclose(feature[2:, error_start : error_start + 46], 2.0)
+
+
 def test_press_mask_dilates_active_and_onset_frames() -> None:
     goals = np.zeros((8, 88), dtype=np.float32)
     goals[4, 10] = 1.0
@@ -157,7 +238,7 @@ def test_press_mask_dilates_active_and_onset_frames() -> None:
     assert np.flatnonzero(mask).tolist() == [3, 4, 5]
 
 
-def _write_tiny_zarr(tmp_path: Path) -> Path:
+def _write_tiny_zarr(tmp_path: Path, *, include_second_song: bool = False) -> Path:
     import zarr
 
     root_path = tmp_path / "rp1m_repertoire.zarr"
@@ -174,4 +255,10 @@ def _write_tiny_zarr(tmp_path: Path) -> Path:
     group.create_dataset("actions", data=actions, chunks=(1, steps, 39))
     group.create_dataset("goals", data=goals, chunks=(1, steps, 89))
     group.create_dataset("hand_fingertips", data=fingertips, chunks=(1, steps, 30))
+    if include_second_song:
+        second = root.create_group(SECOND_SONG_KEY)
+        second.create_dataset("hand_joints", data=q + 0.25, chunks=(1, steps, 46))
+        second.create_dataset("actions", data=actions * 0.5, chunks=(1, steps, 39))
+        second.create_dataset("goals", data=goals, chunks=(1, steps, 89))
+        second.create_dataset("hand_fingertips", data=fingertips, chunks=(1, steps, 30))
     return root_path

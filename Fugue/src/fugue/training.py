@@ -77,6 +77,9 @@ class MetricAccumulator:
     per_dim_sse: np.ndarray | None = None
     per_dim_sae: np.ndarray | None = None
     per_dim_count: int = 0
+    offset_sse: np.ndarray | None = None
+    offset_sae: np.ndarray | None = None
+    offset_count: int = 0
 
     def update(self, pred: torch.Tensor, target: torch.Tensor, press_weight: torch.Tensor | None) -> None:
         pred_np = pred.detach().cpu().numpy().astype(np.float64)
@@ -94,6 +97,14 @@ class MetricAccumulator:
         self.per_dim_sse += per_dim_sse
         self.per_dim_sae += per_dim_sae
         self.per_dim_count += int(diff.shape[0] * diff.shape[1])
+        offset_sse = np.square(diff).sum(axis=(0, 2))
+        offset_sae = abs_diff.sum(axis=(0, 2))
+        if self.offset_sse is None:
+            self.offset_sse = np.zeros_like(offset_sse, dtype=np.float64)
+            self.offset_sae = np.zeros_like(offset_sae, dtype=np.float64)
+        self.offset_sse += offset_sse
+        self.offset_sae += offset_sae
+        self.offset_count += int(diff.shape[0] * diff.shape[2])
         if press_weight is not None:
             mask = press_weight.detach().cpu().numpy() > 1.0
             if mask.any():
@@ -121,6 +132,14 @@ class MetricAccumulator:
         if self.per_dim_sse is not None and self.per_dim_sae is not None:
             metrics["per_dim_mse"] = (self.per_dim_sse / max(self.per_dim_count, 1)).tolist()
             metrics["per_dim_l1"] = (self.per_dim_sae / max(self.per_dim_count, 1)).tolist()
+        if self.offset_sse is not None and self.offset_sae is not None:
+            offset_mse = self.offset_sse / max(self.offset_count, 1)
+            offset_l1 = self.offset_sae / max(self.offset_count, 1)
+            metrics["chunk_offset_mse"] = offset_mse.tolist()
+            metrics["chunk_offset_l1"] = offset_l1.tolist()
+            for offset, value in enumerate(offset_mse):
+                metrics[f"chunk_offset_{offset}_mse"] = float(value)
+                metrics[f"chunk_offset_{offset}_l1"] = float(offset_l1[offset])
         return metrics
 
 

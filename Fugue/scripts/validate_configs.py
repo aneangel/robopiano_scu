@@ -25,7 +25,7 @@ from fugue.data import (  # noqa: E402
     SampleConfig,
     fit_normalization_stats,
     validate_demo_split,
-    write_song_audit,
+    write_dataset_audit,
 )
 from fugue.models import ModelConfig, build_model  # noqa: E402
 from fugue.training import TrainingConfig, action_reconstruction_loss, resolve_device, save_json  # noqa: E402
@@ -73,12 +73,13 @@ def main() -> None:
 def validate_config(*, config_path: Path, args: argparse.Namespace, output_root: Path) -> dict[str, Any]:
     config = _load_config(config_path)
     dataset_cfg = dict(config.get("dataset", {}))
-    song_key = str(args.song_key or dataset_cfg.get("song_key") or DEFAULT_SONG_KEY)
+    song_keys = _dataset_song_keys(dataset_cfg, override=args.song_key)
+    song_key = str(song_keys[0])
     artifact_root = Path(args.dataset_artifact_root) if args.dataset_artifact_root else output_root / "dataset"
     _ensure_dataset_artifacts(
         dataset_root=args.rp1m_root,
         artifact_root=artifact_root,
-        song_key=song_key,
+        song_keys=song_keys,
         dataset_cfg=dataset_cfg,
     )
     manifest = pd.read_csv(artifact_root / "manifest.csv")
@@ -87,6 +88,8 @@ def validate_config(*, config_path: Path, args: argparse.Namespace, output_root:
     sample_config = SampleConfig.from_dict(config.get("sample"))
     training_config = replace(TrainingConfig.from_dict(config.get("training")), batch_size=int(args.batch_size), device=str(args.device))
     dt = float(dataset_cfg.get("dt", stats.dt))
+    max_train_demos_per_song = dataset_cfg.get("max_train_demos_per_song")
+    max_val_demos_per_song = dataset_cfg.get("max_val_demos_per_song")
     train_dataset = FugueActionDataset(
         dataset_root=args.rp1m_root,
         manifest=manifest,
@@ -96,6 +99,7 @@ def validate_config(*, config_path: Path, args: argparse.Namespace, output_root:
         sample_config=sample_config,
         dt=dt,
         max_demos=args.max_train_demos,
+        max_demos_per_song=None if max_train_demos_per_song is None else int(max_train_demos_per_song),
     )
     val_dataset = FugueActionDataset(
         dataset_root=args.rp1m_root,
@@ -106,6 +110,7 @@ def validate_config(*, config_path: Path, args: argparse.Namespace, output_root:
         sample_config=sample_config,
         dt=dt,
         max_demos=args.max_val_demos,
+        max_demos_per_song=None if max_val_demos_per_song is None else int(max_val_demos_per_song),
     )
     train_loader = DataLoader(train_dataset, batch_size=int(training_config.batch_size), shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=int(training_config.batch_size), shuffle=False, num_workers=0)
@@ -147,6 +152,8 @@ def validate_config(*, config_path: Path, args: argparse.Namespace, output_root:
         "config": str(config_path),
         "status": "passed",
         "song_key": song_key,
+        "song_keys": [str(value) for value in song_keys],
+        "num_songs": int(len(song_keys)),
         "feature_mode": sample_config.feature_mode,
         "model_type": model_cfg.type,
         "chunk_horizon": int(sample_config.chunk_horizon),
@@ -166,21 +173,22 @@ def _ensure_dataset_artifacts(
     *,
     dataset_root: str,
     artifact_root: Path,
-    song_key: str,
+    song_keys: list[str],
     dataset_cfg: dict[str, Any],
 ) -> None:
     artifact_root.mkdir(parents=True, exist_ok=True)
     manifest_path = artifact_root / "manifest.csv"
     summary_path = artifact_root / "dataset_summary.json"
     if not manifest_path.exists() or not summary_path.exists():
-        write_song_audit(
+        write_dataset_audit(
             dataset_root=dataset_root,
             output_root=artifact_root,
-            song_key=song_key,
+            song_keys=song_keys,
             train_frac=float(dataset_cfg.get("train_frac", 0.70)),
             val_frac=float(dataset_cfg.get("val_frac", 0.15)),
             test_frac=float(dataset_cfg.get("test_frac", 0.15)),
             seed=int(dataset_cfg.get("split_seed", 7)),
+            split_by_song=bool(dataset_cfg.get("split_by_song", False)),
         )
     stats_path = artifact_root / "normalization.json"
     if not stats_path.exists():
@@ -188,10 +196,36 @@ def _ensure_dataset_artifacts(
         stats = fit_normalization_stats(
             dataset_root=dataset_root,
             manifest=manifest,
-            song_key=song_key,
+            song_key=str(song_keys[0]),
             dt=float(dataset_cfg.get("dt", 0.05)),
+            max_demos=(
+                None
+                if dataset_cfg.get("normalization_max_demos") is None
+                else int(dataset_cfg.get("normalization_max_demos"))
+            ),
+            max_demos_per_song=(
+                None
+                if dataset_cfg.get("normalization_max_demos_per_song", dataset_cfg.get("max_train_demos_per_song"))
+                is None
+                else int(dataset_cfg.get("normalization_max_demos_per_song", dataset_cfg.get("max_train_demos_per_song")))
+            ),
         )
         stats.save(stats_path)
+
+
+def _dataset_song_keys(dataset_cfg: dict[str, Any], *, override: str | None) -> list[str]:
+    if override:
+        return [str(override)]
+    raw = dataset_cfg.get("song_keys")
+    if raw is None:
+        return [str(dataset_cfg.get("song_key") or DEFAULT_SONG_KEY)]
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",") if part.strip()]
+    else:
+        values = [str(value).strip() for value in raw if str(value).strip()]
+    if not values:
+        raise ValueError("dataset.song_keys was provided but empty")
+    return values
 
 
 def _load_config(path: str | Path) -> dict[str, Any]:

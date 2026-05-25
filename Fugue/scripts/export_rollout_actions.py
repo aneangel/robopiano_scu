@@ -33,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-rollout", action="store_true")
     parser.add_argument("--environment-name", default=DEFAULT_ENVIRONMENT_NAME)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--chunk-aggregation", default="uniform", choices=("uniform", "first", "temporal_aggregate"))
+    parser.add_argument("--temporal-agg-decay", type=float, default=0.7)
     return parser
 
 
@@ -52,6 +54,8 @@ def main() -> None:
         dataset_root=args.rp1m_root,
         demo_id=demo_id,
         device=args.device,
+        chunk_aggregation=args.chunk_aggregation,
+        temporal_agg_decay=float(args.temporal_agg_decay),
     )
     prediction.update({"checkpoint": str(args.checkpoint), "split": str(args.split)})
     npz_path = save_npz_prediction(output_dir / "predicted_actions.npz", prediction)
