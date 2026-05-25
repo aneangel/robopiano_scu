@@ -152,6 +152,11 @@ def _assignment_candidate_diagnostic(
         "ik_residual": float(ik_result.residual_norm),
         "ik_max_residual": float(ik_result.max_residual),
         "ik_success": bool(ik_result.success),
+        "contact_validation_used": bool(getattr(ik_result, "contact_validation_used", False)),
+        "contact_target_hit_count": int(getattr(ik_result, "contact_target_hit_count", 0)),
+        "contact_wrong_key_count": int(getattr(ik_result, "contact_wrong_key_count", 0)),
+        "contact_missed_key_count": int(getattr(ik_result, "contact_missed_key_count", 0)),
+        "contact_played_key_count": int(getattr(ik_result, "contact_played_key_count", 0)),
         "motion_cost": float(motion),
         "final_score": float(final_score),
         "selected": bool(selected),
@@ -182,6 +187,13 @@ def _sequence_beam_score(
         + _unassigned_score(int(assignment.unassigned_keys.size), config)
         + (0.0 if ik_result.success else float(config.assignment_ik_failure_penalty))
     )
+    if bool(getattr(ik_result, "contact_validation_used", False)):
+        score += float(getattr(config, "ik_static_contact_wrong_key_weight", 1.0)) * float(
+            getattr(ik_result, "contact_wrong_key_count", 0)
+        )
+        score += float(getattr(config, "ik_static_contact_missed_key_weight", 2.0)) * float(
+            getattr(ik_result, "contact_missed_key_count", 0)
+        )
     return float(score), float(crossing), float(motion)
 
 
@@ -506,6 +518,11 @@ def plan_target_keys(
         candidate_diagnostics: list[dict[str, Any]] = []
 
         strategy = str(getattr(cfg, "assignment_strategy", "legacy_previous_pose"))
+        candidate_scoring_cfg = cfg
+        if bool(getattr(cfg, "rhapsody_ik_enabled", False)) and not bool(
+            getattr(cfg, "rhapsody_ik_candidate_scoring", False)
+        ):
+            candidate_scoring_cfg = replace(cfg, rhapsody_ik_enabled=False)
 
         if strategy == "sequence_beam":
             (
@@ -568,7 +585,7 @@ def plan_target_keys(
                         assignment,
                         previous_qpos,
                         neutral_qpos=neutral_qpos,
-                        config=cfg,
+                        config=candidate_scoring_cfg,
                     )
                     score, crossing, motion = _sequence_beam_score(
                         candidate_base_cost=float(candidate.base_cost),
@@ -599,6 +616,13 @@ def plan_target_keys(
                     raise RuntimeError("generate_assignment_candidates returned no usable candidate")
                 assignment = best_assignment
                 result = best_result
+                if candidate_scoring_cfg is not cfg and assignment.count:
+                    result = kin.solve_press_pose(
+                        assignment,
+                        previous_qpos,
+                        neutral_qpos=neutral_qpos,
+                        config=cfg,
+                    )
                 if waypoint_index < 500 and candidate_diagnostics:
                     for diagnostic in reversed(candidate_diagnostics):
                         if diagnostic["waypoint_index"] != waypoint_index:

@@ -230,7 +230,7 @@ def test_build_primitive_instances_recovers_segment_context(tmp_path: Path) -> N
     assert len(instances) == 1
     instance = instances[0]
     np.testing.assert_allclose(instance.start_joint_state, hand_joints[0, 1])
-    np.testing.assert_allclose(instance.start_piano_state, piano_states[0, 1])
+    assert instance.start_piano_state is None
     assert instance.duration_steps == 4
     assert instance.intended_keys == (10, 11)
     assert instance.realized_keys_gt == (10, 11)

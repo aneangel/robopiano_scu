@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -42,25 +43,144 @@ def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
         seed=int(config.seed),
         reduced_action_space=bool(config.reduced_action_space),
         ik_fingertip_weight=float(config.ik_fingertip_weight),
+        ik_key_front_weight=float(config.ik_key_front_weight),
+        ik_key_width_weight=float(config.ik_key_width_weight),
+        ik_key_height_weight=float(config.ik_key_height_weight),
         ik_smoothness_weight=float(config.ik_smoothness_weight),
         ik_neutral_weight=float(config.ik_neutral_weight),
+        ik_inactive_fingertip_clearance_weight=float(config.ik_inactive_fingertip_clearance_weight),
+        ik_inactive_fingertip_clearance=float(config.ik_inactive_fingertip_clearance),
+        ik_unassigned_fingertip_strategy=str(config.ik_unassigned_fingertip_strategy),
+        ik_unassigned_fingertip_avoidance_weight=float(config.ik_unassigned_fingertip_avoidance_weight),
+        ik_unassigned_fingertip_avoidance_radius=float(config.ik_unassigned_fingertip_avoidance_radius),
+        ik_wrong_key_xy_avoidance_weight=float(config.ik_wrong_key_xy_avoidance_weight),
+        ik_wrong_key_xy_avoidance_radius=float(config.ik_wrong_key_xy_avoidance_radius),
         ik_max_nfev=int(config.ik_max_nfev),
         ik_ftol=float(config.ik_ftol),
         ik_xtol=float(config.ik_xtol),
         ik_gtol=float(config.ik_gtol),
         residual_success_threshold=float(config.residual_success_threshold),
+        ik_multistart_on_failure=bool(config.ik_multistart_on_failure),
+        ik_multistart_seed_count=int(config.ik_multistart_seed_count),
+        ik_multistart_forearm_tx_grid=int(config.ik_multistart_forearm_tx_grid),
+        ik_static_contact_validation=bool(config.ik_static_contact_validation),
+        ik_static_contact_settle_steps=int(config.ik_static_contact_settle_steps),
+        ik_static_contact_wrong_key_weight=float(config.ik_static_contact_wrong_key_weight),
+        ik_static_contact_missed_key_weight=float(config.ik_static_contact_missed_key_weight),
+        ik_static_contact_residual_weight=float(config.ik_static_contact_residual_weight),
+        ik_static_contact_failure_weight=float(config.ik_static_contact_failure_weight),
+        rhapsody_ik_enabled=bool(config.rhapsody_ik_enabled),
+        rhapsody_ik_checkpoint=str(config.rhapsody_ik_checkpoint),
+        rhapsody_ik_refinement_steps=int(config.rhapsody_ik_refinement_steps),
+        rhapsody_ik_refinement_lr=float(config.rhapsody_ik_refinement_lr),
+        rhapsody_ik_device=str(config.rhapsody_ik_device),
+        rhapsody_ik_candidate_scoring=bool(config.rhapsody_ik_candidate_scoring),
+        rhapsody_ik_coordinate_transform=str(config.rhapsody_ik_coordinate_transform),
+        rhapsody_ik_y_offset=float(config.rhapsody_ik_y_offset),
+        rhapsody_ik_fill_inactive_from_previous=bool(config.rhapsody_ik_fill_inactive_from_previous),
+        rhapsody_ik_seed_max_active_error=float(config.rhapsody_ik_seed_max_active_error),
+        rhapsody_ik_seed_require_previous_improvement=bool(config.rhapsody_ik_seed_require_previous_improvement),
+        key_target_front_offset=float(config.key_target_front_offset),
+        key_target_top_offset=float(config.key_target_top_offset),
         key_press_depth=float(config.key_press_depth),
         distance_weight=float(config.assignment_distance_weight),
         same_finger_bonus=float(config.same_finger_bonus),
         reassignment_penalty=float(config.reassignment_penalty),
         finger_crossing_penalty=float(config.finger_crossing_penalty),
         wrong_hand_penalty=float(config.wrong_hand_penalty),
+        wrong_hand_split_key=int(config.wrong_hand_split_key),
+        assignment_dynamic_hand_split=bool(config.assignment_dynamic_hand_split),
+        assignment_dynamic_hand_split_min_span=int(config.assignment_dynamic_hand_split_min_span),
+        assignment_dynamic_hand_split_min_keys=int(config.assignment_dynamic_hand_split_min_keys),
         large_jump_penalty=float(config.large_jump_penalty),
         same_key_same_finger_bonus=float(config.same_key_same_finger_bonus),
+        assignment_strategy=str(config.assignment_strategy),
         assignment_distance_weight=float(config.assignment_distance_weight),
+        assignment_hand_zone_weight=float(config.assignment_hand_zone_weight),
+        assignment_finger_zone_weight=float(config.assignment_finger_zone_weight),
         assignment_crossing_weight=float(config.finger_crossing_penalty),
+        assignment_hold_weight=float(config.assignment_hold_weight),
+        assignment_reach_weight=float(config.assignment_reach_weight),
+        assignment_black_key_weight=float(config.assignment_black_key_weight),
+        assignment_hard_hand_split=bool(config.assignment_hard_hand_split),
+        assignment_middle_key=int(config.assignment_middle_key),
         assignment_wrong_hand_penalty=float(config.wrong_hand_penalty),
+        assignment_reach_soft_limit=float(config.assignment_reach_soft_limit),
+        assignment_top_k=int(config.assignment_top_k),
+        assignment_top_k_extra_penalty=float(config.assignment_top_k_extra_penalty),
+        assignment_beam_width=int(config.assignment_beam_width),
+        assignment_candidates_per_step=int(config.assignment_candidates_per_step),
+        assignment_fail_if_unassigned=bool(config.assignment_fail_if_unassigned),
+        assignment_unassigned_penalty=float(config.assignment_unassigned_penalty),
+        assignment_ik_residual_weight=float(config.assignment_ik_residual_weight),
+        assignment_ik_max_residual_weight=float(config.assignment_ik_max_residual_weight),
+        assignment_ik_failure_penalty=float(config.assignment_ik_failure_penalty),
+        assignment_motion_weight=float(config.assignment_motion_weight),
     )
+
+
+def _polyphony_stats(target_keys: np.ndarray, *, threshold: float) -> dict[str, object]:
+    keys = validate_target_keys(target_keys)
+    active_counts = np.count_nonzero(keys[:, :88] > float(threshold), axis=1).astype(np.int32)
+    active_frames = active_counts > 0
+    return {
+        "active_frame_rate": float(np.mean(active_frames)) if active_counts.size else 0.0,
+        "mean_polyphony": float(np.mean(active_counts)) if active_counts.size else 0.0,
+        "active_mean_polyphony": float(np.mean(active_counts[active_frames])) if bool(np.any(active_frames)) else 0.0,
+        "max_polyphony": int(np.max(active_counts)) if active_counts.size else 0,
+    }
+
+
+def _with_adaptive_complex_song_defaults(
+    config: ImpromptuConfig,
+    target_keys: np.ndarray,
+) -> tuple[ImpromptuConfig, dict[str, object]]:
+    stats = _polyphony_stats(target_keys, threshold=float(config.threshold))
+    active_mean = float(stats["active_mean_polyphony"])
+    max_polyphony = int(stats["max_polyphony"])
+    is_complex = bool(
+        active_mean >= float(config.adaptive_active_mean_polyphony_threshold)
+        or max_polyphony >= int(config.adaptive_max_polyphony_threshold)
+    )
+    metadata: dict[str, object] = {
+        **stats,
+        "enabled": bool(config.adaptive_complex_song_defaults),
+        "activated": False,
+        "active_mean_polyphony_threshold": float(config.adaptive_active_mean_polyphony_threshold),
+        "max_polyphony_threshold": int(config.adaptive_max_polyphony_threshold),
+        "overrides": {},
+    }
+    if not bool(config.adaptive_complex_song_defaults) or not is_complex:
+        return config, metadata
+
+    defaults = ImpromptuConfig(
+        adaptive_complex_song_defaults=bool(config.adaptive_complex_song_defaults),
+        adaptive_active_mean_polyphony_threshold=float(config.adaptive_active_mean_polyphony_threshold),
+        adaptive_max_polyphony_threshold=int(config.adaptive_max_polyphony_threshold),
+    )
+    desired = {
+        "key_press_depth": 0.0040,
+        "wrong_hand_penalty": 4.0,
+        "wrong_hand_split_key": 48,
+        "assignment_dynamic_hand_split": True,
+        "assignment_dynamic_hand_split_min_span": 12,
+        "assignment_dynamic_hand_split_min_keys": 3,
+        "finger_crossing_penalty": 1.0,
+        "same_key_same_finger_bonus": 0.25,
+        "ik_unassigned_fingertip_strategy": "avoid_mispresses",
+        "ik_unassigned_fingertip_avoidance_weight": 0.5,
+        "ik_unassigned_fingertip_avoidance_radius": 0.03,
+    }
+    overrides: dict[str, object] = {}
+    for name, value in desired.items():
+        if getattr(config, name) == getattr(defaults, name):
+            overrides[name] = value
+    if not overrides:
+        metadata["activated"] = True
+        return config, metadata
+    metadata["activated"] = True
+    metadata["overrides"] = dict(overrides)
+    return replace(config, **overrides), metadata
 
 
 def _metadata(
@@ -158,6 +278,24 @@ def _control_frame_anchor_metrics(
     return np.zeros((0, len(IK_ANCHOR_METRIC_COLUMNS)), dtype=np.float32)
 
 
+def _waypoint_release_frames(target_keys: np.ndarray, waypoint_frames: np.ndarray, *, threshold: float) -> np.ndarray:
+    keys = np.asarray(target_keys, dtype=np.float32)
+    frames = np.asarray(waypoint_frames, dtype=np.int64).reshape(-1)
+    if frames.size == 0 or keys.size == 0:
+        return np.zeros((0,), dtype=np.int64)
+    active = keys[:, :88] > float(threshold)
+    releases: list[int] = []
+    total = int(active.shape[0])
+    for frame in frames:
+        start = int(np.clip(int(frame), 0, max(total - 1, 0)))
+        row = active[start]
+        end = start
+        while end + 1 < total and np.array_equal(active[end + 1], row):
+            end += 1
+        releases.append(int(end))
+    return np.asarray(releases, dtype=np.int64)
+
+
 def _anchor_results_for_qpos_rows(
     *,
     anchor_frames: np.ndarray,
@@ -225,8 +363,9 @@ def plan_target_keys(
     *,
     kinematics: BagatelleKinematics | None = None,
 ) -> ImpromptuTrajectory:
-    cfg = config or ImpromptuConfig()
+    base_cfg = config or ImpromptuConfig()
     keys = validate_target_keys(target_keys)
+    cfg, adaptive_metadata = _with_adaptive_complex_song_defaults(base_cfg, keys)
     bag_cfg = _bagatelle_config(cfg)
 
     owns_kinematics = kinematics is None
@@ -279,6 +418,11 @@ def plan_target_keys(
             joint_space_plan = build_joint_space_straightened_trajectory(
                 total_steps=int(keys.shape[0]),
                 waypoint_frames=bagatelle_plan.waypoint_frames,
+                waypoint_release_frames=_waypoint_release_frames(
+                    keys,
+                    bagatelle_plan.waypoint_frames,
+                    threshold=float(cfg.threshold),
+                ),
                 waypoint_qpos=bagatelle_plan.waypoint_hand_joints,
                 assignments=bagatelle_plan.assignments,
                 neutral_qpos=neutral_qpos,
@@ -432,6 +576,7 @@ def plan_target_keys(
             "include_midpoint_anchors": bool(cfg.include_midpoint_anchors),
             "anchor_change_threshold": float(cfg.anchor_change_threshold),
         }
+        metadata["adaptive_complex_song_defaults"] = adaptive_metadata
         metadata["trajectory_refinement"] = refinement_metadata
         metadata["sparse_press_ik_metric_columns"] = list(BAGATELLE_IK_METRIC_COLUMNS)
         metadata["sparse_press_ik_metrics_shape"] = list(bagatelle_plan.ik_metrics.shape)

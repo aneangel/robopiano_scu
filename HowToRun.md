@@ -24,7 +24,31 @@ Before running any Sonata scripts, activate the correct Conda environment:
 conda activate sonata
 ```
 
+For non-interactive Slurm batch scripts, source Conda's profile script directly
+instead of sourcing `~/.bashrc`. On WAVE compute nodes, `~/.bashrc` can exit the
+batch shell before `conda activate` runs.
+
+```bash
+source /WAVE/apps/el8/conda/envs/Python/20240305/etc/profile.d/conda.sh
+conda activate sonata
+```
+
 Use this environment for preprocessing, training, evaluation, and rollout scripts.
+
+After activating `sonata`, put the Conda runtime libraries first in
+`LD_LIBRARY_PATH`:
+
+```bash
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+```
+
+This is required for RoboPianist, `note_seq`, `pretty_midi`, and `fluidsynth`
+imports on WAVE nodes. Without it, Python may load `/lib64/libstdc++.so.6`
+instead of the Conda `libstdc++.so.6`, causing failures such as:
+
+```text
+OSError: /lib64/libstdc++.so.6: version `CXXABI_1.3.15' not found
+```
 
 ---
 
@@ -93,6 +117,7 @@ Inside the session, move to the project directory and activate the environment:
 ```bash
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 ```
 
@@ -233,6 +258,7 @@ srun -p cmp \
 
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 export RUN_NAME=sonata_cpu_$(date +%Y%m%d_%H%M%S)
@@ -254,6 +280,7 @@ srun -p gpu \
 
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 export RUN_NAME=sonata_gpu_$(date +%Y%m%d_%H%M%S)
@@ -276,6 +303,7 @@ Example pattern for launching a Sonata preprocessing or training script:
 ```bash
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 export RUN_NAME=example_run_$(date +%Y%m%d_%H%M%S)
@@ -409,6 +437,7 @@ srun -p gpu \
 
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 export OUTPUT_ROOT=/WAVE/datasets/ccoelho_lab-jlanders/my_new_run
@@ -430,6 +459,7 @@ tmux new -s sonata_run
 srun -p gpu --gres=gpu:1 --cpus-per-task=16 --mem=128G --time=1-00:00:00 --pty bash
 cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export RP1M_300_ROOT=/WAVE/users/unix/jlanders/rp1m_300/rp1m_repertoire.zarr
 export OUTPUT_ROOT=/WAVE/datasets/ccoelho_lab-jlanders/my_new_run
 mkdir -p $OUTPUT_ROOT

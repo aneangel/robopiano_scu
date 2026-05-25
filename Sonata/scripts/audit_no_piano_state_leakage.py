@@ -67,7 +67,7 @@ def main() -> None:
             if not any(pattern.search(line) for pattern in SUSPICIOUS_PATTERNS):
                 continue
             context = "\n".join(lines[max(0, line_no - 40) : min(len(lines), line_no + 12)])
-            if "piano_states_gt=_as_float_array" in line or "start_piano_state=_first_frame" in line:
+            if "piano_states_gt=_as_float_array" in line:
                 continue
             if any(token in context for token in ALLOW_GUARDS):
                 continue

@@ -12,6 +12,7 @@ for _path in (
     REPO_ROOT / "Impromptu" / "src",
     REPO_ROOT / "Bagatelle" / "src",
     REPO_ROOT / "Intermezzo" / "src",
+    REPO_ROOT / "Rhapsody" / "src",
     REPO_ROOT / "Variations" / "src",
     REPO_ROOT / "Variations",
     REPO_ROOT / "partita" / "src",
@@ -54,12 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("joint_space_straighten", "dense_fingertip_ik"),
         default="joint_space_straighten",
     )
+    parser.add_argument("--disable-adaptive-complex-song-defaults", action="store_true")
+    parser.add_argument("--adaptive-active-mean-polyphony-threshold", type=float, default=2.2)
+    parser.add_argument("--adaptive-max-polyphony-threshold", type=int, default=5)
     parser.add_argument("--interpolation-substeps", type=int, default=10)
     parser.add_argument("--approach-s", type=float, default=0.055)
     parser.add_argument("--hold-s", type=float, default=0.008)
     parser.add_argument("--release-s", type=float, default=0.025)
     parser.add_argument("--clearance-height", type=float, default=0.04)
-    parser.add_argument("--key-press-depth", type=float, default=0.005)
+    parser.add_argument("--key-press-depth", type=float, default=0.0035)
     parser.add_argument("--inactive-clearance-height", type=float, default=0.04)
     parser.add_argument("--inactive-clearance-weight", type=float, default=1.0)
     parser.add_argument("--active-clearance-weight", type=float, default=0.1)
@@ -82,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--joint-space-approach-fraction", type=float, default=0.35)
     parser.add_argument("--joint-space-straighten-all-fingers", action="store_true")
     parser.add_argument("--no-joint-space-preserve-sustained-fingers", action="store_true")
+    parser.add_argument("--joint-space-preserve-repeated-key-gaps", action="store_true")
     parser.add_argument("--no-joint-space-straighten-idle-waypoint-fingers", action="store_true")
     parser.add_argument("--joint-space-lift-straight-anchors", action="store_true")
     parser.add_argument("--joint-space-straight-lift-height", type=float, default=0.02)
@@ -90,19 +95,90 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reassignment-penalty", type=float, default=0.0)
     parser.add_argument("--finger-crossing-penalty", type=float, default=0.0)
     parser.add_argument("--wrong-hand-penalty", type=float, default=0.0)
+    parser.add_argument("--wrong-hand-split-key", type=int, default=44)
+    parser.add_argument("--assignment-dynamic-hand-split", action="store_true")
+    parser.add_argument("--assignment-dynamic-hand-split-min-span", type=int, default=12)
+    parser.add_argument("--assignment-dynamic-hand-split-min-keys", type=int, default=3)
     parser.add_argument("--large-jump-penalty", type=float, default=0.0)
     parser.add_argument("--same-key-same-finger-bonus", type=float, default=0.0)
+    parser.add_argument(
+        "--assignment-strategy",
+        choices=("legacy_previous_pose", "composite_cost", "ik_aware_topk", "sequence_beam"),
+        default="legacy_previous_pose",
+    )
+    parser.add_argument("--assignment-hand-zone-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-finger-zone-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-hold-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-reach-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-black-key-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-hard-hand-split", action="store_true")
+    parser.add_argument("--assignment-middle-key", type=int, default=44)
+    parser.add_argument("--assignment-reach-soft-limit", type=float, default=0.20)
+    parser.add_argument("--assignment-top-k", type=int, default=1)
+    parser.add_argument("--assignment-top-k-extra-penalty", type=float, default=1e-4)
+    parser.add_argument("--assignment-beam-width", type=int, default=4)
+    parser.add_argument("--assignment-candidates-per-step", type=int, default=0)
+    parser.add_argument("--assignment-fail-if-unassigned", action="store_true")
+    parser.add_argument("--assignment-unassigned-penalty", type=float, default=25.0)
+    parser.add_argument("--assignment-ik-residual-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-ik-max-residual-weight", type=float, default=0.0)
+    parser.add_argument("--assignment-ik-failure-penalty", type=float, default=10.0)
+    parser.add_argument("--assignment-motion-weight", type=float, default=0.0)
     parser.add_argument("--anchor-stride", type=int, default=1)
     parser.add_argument("--anchor-change-threshold", type=float, default=0.01)
     parser.add_argument("--solve-contact-window-only", action="store_true")
     parser.add_argument("--solve-all-stride-anchors", action="store_true")
     parser.add_argument("--include-midpoint-anchors", action="store_true", default=True)
     parser.add_argument("--no-include-midpoint-anchors", action="store_true")
-    parser.add_argument("--ik-fingertip-weight", type=float, default=1.0)
-    parser.add_argument("--ik-smoothness-weight", type=float, default=0.10)
-    parser.add_argument("--ik-neutral-weight", type=float, default=0.02)
-    parser.add_argument("--ik-max-nfev", type=int, default=80)
-    parser.add_argument("--residual-success-threshold", type=float, default=0.018)
+    parser.add_argument("--ik-fingertip-weight", type=float, default=2.0)
+    parser.add_argument("--ik-key-front-weight", type=float, default=1.0)
+    parser.add_argument("--ik-key-width-weight", type=float, default=1.0)
+    parser.add_argument("--ik-key-height-weight", type=float, default=1.0)
+    parser.add_argument("--ik-smoothness-weight", type=float, default=0.05)
+    parser.add_argument("--ik-neutral-weight", type=float, default=0.005)
+    parser.add_argument("--ik-inactive-fingertip-clearance-weight", type=float, default=0.0)
+    parser.add_argument("--ik-inactive-fingertip-clearance", type=float, default=0.02)
+    parser.add_argument(
+        "--ik-unassigned-fingertip-strategy",
+        choices=("legacy", "avoid_mispresses"),
+        default="legacy",
+    )
+    parser.add_argument("--ik-unassigned-fingertip-avoidance-weight", type=float, default=0.5)
+    parser.add_argument("--ik-unassigned-fingertip-avoidance-radius", type=float, default=0.03)
+    parser.add_argument("--ik-wrong-key-xy-avoidance-weight", type=float, default=0.0)
+    parser.add_argument("--ik-wrong-key-xy-avoidance-radius", type=float, default=0.025)
+    parser.add_argument("--ik-max-nfev", type=int, default=160)
+    parser.add_argument("--residual-success-threshold", type=float, default=0.02)
+    parser.add_argument("--disable-ik-multistart-on-failure", action="store_true")
+    parser.add_argument("--ik-multistart-seed-count", type=int, default=2)
+    parser.add_argument("--ik-multistart-forearm-tx-grid", type=int, default=5)
+    parser.add_argument("--ik-static-contact-validation", action="store_true")
+    parser.add_argument("--ik-static-contact-settle-steps", type=int, default=1)
+    parser.add_argument("--ik-static-contact-wrong-key-weight", type=float, default=1.0)
+    parser.add_argument("--ik-static-contact-missed-key-weight", type=float, default=2.0)
+    parser.add_argument("--ik-static-contact-residual-weight", type=float, default=10.0)
+    parser.add_argument("--ik-static-contact-failure-weight", type=float, default=25.0)
+    parser.add_argument("--enable-rhapsody-ik", action="store_true")
+    parser.add_argument("--rhapsody-ik-checkpoint", default="")
+    parser.add_argument("--rhapsody-ik-refinement-steps", type=int, default=0)
+    parser.add_argument("--rhapsody-ik-refinement-lr", type=float, default=0.05)
+    parser.add_argument("--rhapsody-ik-device", default="cpu")
+    parser.add_argument(
+        "--rhapsody-ik-candidate-scoring",
+        action="store_true",
+        help="Use Rhapsody seeds while scoring every IK-aware assignment candidate. Slower; default seeds only the selected pose.",
+    )
+    parser.add_argument(
+        "--rhapsody-ik-coordinate-transform",
+        choices=("bagatelle_to_rp1m", "none"),
+        default="bagatelle_to_rp1m",
+    )
+    parser.add_argument("--rhapsody-ik-y-offset", type=float, default=0.08289646)
+    parser.add_argument("--no-rhapsody-ik-fill-inactive-from-previous", action="store_true")
+    parser.add_argument("--rhapsody-ik-seed-max-active-error", type=float, default=0.08)
+    parser.add_argument("--no-rhapsody-ik-seed-require-previous-improvement", action="store_true")
+    parser.add_argument("--key-target-front-offset", type=float, default=0.35)
+    parser.add_argument("--key-target-top-offset", type=float, default=0.5)
     parser.add_argument("--enable-trajectory-refinement", action="store_true")
     parser.add_argument("--trajectory-refinement-window-frames", type=int, default=24)
     parser.add_argument("--trajectory-refinement-max-nfev", type=int, default=20)
@@ -163,6 +239,9 @@ def main() -> None:
         environment_name=str(args.environment_name),
         seed=int(args.seed),
         trajectory_mode=str(args.trajectory_mode),
+        adaptive_complex_song_defaults=not bool(args.disable_adaptive_complex_song_defaults),
+        adaptive_active_mean_polyphony_threshold=float(args.adaptive_active_mean_polyphony_threshold),
+        adaptive_max_polyphony_threshold=int(args.adaptive_max_polyphony_threshold),
         interpolation_substeps=int(args.interpolation_substeps),
         approach_s=float(args.approach_s),
         hold_s=float(args.hold_s),
@@ -175,6 +254,7 @@ def main() -> None:
         joint_space_approach_fraction=float(args.joint_space_approach_fraction),
         joint_space_straighten_all_fingers=bool(args.joint_space_straighten_all_fingers),
         joint_space_preserve_sustained_fingers=not bool(args.no_joint_space_preserve_sustained_fingers),
+        joint_space_release_repeated_keys_across_gaps=not bool(args.joint_space_preserve_repeated_key_gaps),
         joint_space_straighten_idle_fingers_at_waypoints=not bool(
             args.no_joint_space_straighten_idle_waypoint_fingers
         ),
@@ -195,17 +275,74 @@ def main() -> None:
         reassignment_penalty=float(args.reassignment_penalty),
         finger_crossing_penalty=float(args.finger_crossing_penalty),
         wrong_hand_penalty=float(args.wrong_hand_penalty),
+        wrong_hand_split_key=int(args.wrong_hand_split_key),
+        assignment_dynamic_hand_split=bool(args.assignment_dynamic_hand_split),
+        assignment_dynamic_hand_split_min_span=int(args.assignment_dynamic_hand_split_min_span),
+        assignment_dynamic_hand_split_min_keys=int(args.assignment_dynamic_hand_split_min_keys),
         large_jump_penalty=float(args.large_jump_penalty),
         same_key_same_finger_bonus=float(args.same_key_same_finger_bonus),
+        assignment_strategy=str(args.assignment_strategy),
+        assignment_hand_zone_weight=float(args.assignment_hand_zone_weight),
+        assignment_finger_zone_weight=float(args.assignment_finger_zone_weight),
+        assignment_hold_weight=float(args.assignment_hold_weight),
+        assignment_reach_weight=float(args.assignment_reach_weight),
+        assignment_black_key_weight=float(args.assignment_black_key_weight),
+        assignment_hard_hand_split=bool(args.assignment_hard_hand_split),
+        assignment_middle_key=int(args.assignment_middle_key),
+        assignment_reach_soft_limit=float(args.assignment_reach_soft_limit),
+        assignment_top_k=int(args.assignment_top_k),
+        assignment_top_k_extra_penalty=float(args.assignment_top_k_extra_penalty),
+        assignment_beam_width=int(args.assignment_beam_width),
+        assignment_candidates_per_step=int(args.assignment_candidates_per_step),
+        assignment_fail_if_unassigned=bool(args.assignment_fail_if_unassigned),
+        assignment_unassigned_penalty=float(args.assignment_unassigned_penalty),
+        assignment_ik_residual_weight=float(args.assignment_ik_residual_weight),
+        assignment_ik_max_residual_weight=float(args.assignment_ik_max_residual_weight),
+        assignment_ik_failure_penalty=float(args.assignment_ik_failure_penalty),
+        assignment_motion_weight=float(args.assignment_motion_weight),
         anchor_stride=int(args.anchor_stride),
         anchor_change_threshold=float(args.anchor_change_threshold),
         solve_contact_window_only=bool(solve_contact_window_only),
         include_midpoint_anchors=not bool(args.no_include_midpoint_anchors),
         ik_fingertip_weight=float(args.ik_fingertip_weight),
+        ik_key_front_weight=float(args.ik_key_front_weight),
+        ik_key_width_weight=float(args.ik_key_width_weight),
+        ik_key_height_weight=float(args.ik_key_height_weight),
         ik_smoothness_weight=float(args.ik_smoothness_weight),
         ik_neutral_weight=float(args.ik_neutral_weight),
+        ik_inactive_fingertip_clearance_weight=float(args.ik_inactive_fingertip_clearance_weight),
+        ik_inactive_fingertip_clearance=float(args.ik_inactive_fingertip_clearance),
+        ik_unassigned_fingertip_strategy=str(args.ik_unassigned_fingertip_strategy),
+        ik_unassigned_fingertip_avoidance_weight=float(args.ik_unassigned_fingertip_avoidance_weight),
+        ik_unassigned_fingertip_avoidance_radius=float(args.ik_unassigned_fingertip_avoidance_radius),
+        ik_wrong_key_xy_avoidance_weight=float(args.ik_wrong_key_xy_avoidance_weight),
+        ik_wrong_key_xy_avoidance_radius=float(args.ik_wrong_key_xy_avoidance_radius),
         ik_max_nfev=int(args.ik_max_nfev),
         residual_success_threshold=float(args.residual_success_threshold),
+        ik_multistart_on_failure=not bool(args.disable_ik_multistart_on_failure),
+        ik_multistart_seed_count=int(args.ik_multistart_seed_count),
+        ik_multistart_forearm_tx_grid=int(args.ik_multistart_forearm_tx_grid),
+        ik_static_contact_validation=bool(args.ik_static_contact_validation),
+        ik_static_contact_settle_steps=int(args.ik_static_contact_settle_steps),
+        ik_static_contact_wrong_key_weight=float(args.ik_static_contact_wrong_key_weight),
+        ik_static_contact_missed_key_weight=float(args.ik_static_contact_missed_key_weight),
+        ik_static_contact_residual_weight=float(args.ik_static_contact_residual_weight),
+        ik_static_contact_failure_weight=float(args.ik_static_contact_failure_weight),
+        rhapsody_ik_enabled=bool(args.enable_rhapsody_ik),
+        rhapsody_ik_checkpoint=str(args.rhapsody_ik_checkpoint),
+        rhapsody_ik_refinement_steps=int(args.rhapsody_ik_refinement_steps),
+        rhapsody_ik_refinement_lr=float(args.rhapsody_ik_refinement_lr),
+        rhapsody_ik_device=str(args.rhapsody_ik_device),
+        rhapsody_ik_candidate_scoring=bool(args.rhapsody_ik_candidate_scoring),
+        rhapsody_ik_coordinate_transform=str(args.rhapsody_ik_coordinate_transform),
+        rhapsody_ik_y_offset=float(args.rhapsody_ik_y_offset),
+        rhapsody_ik_fill_inactive_from_previous=not bool(args.no_rhapsody_ik_fill_inactive_from_previous),
+        rhapsody_ik_seed_max_active_error=float(args.rhapsody_ik_seed_max_active_error),
+        rhapsody_ik_seed_require_previous_improvement=not bool(
+            args.no_rhapsody_ik_seed_require_previous_improvement
+        ),
+        key_target_front_offset=float(args.key_target_front_offset),
+        key_target_top_offset=float(args.key_target_top_offset),
         enable_trajectory_refinement=bool(args.enable_trajectory_refinement),
         trajectory_refinement_window_frames=int(args.trajectory_refinement_window_frames),
         trajectory_refinement_max_nfev=int(args.trajectory_refinement_max_nfev),

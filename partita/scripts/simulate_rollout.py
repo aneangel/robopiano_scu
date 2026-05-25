@@ -117,8 +117,8 @@ def main() -> None:
         choices=["original", "reconstructed", "original-state", "reconstructed-state", "both", "all"],
         default="both",
         help=(
-            "original/reconstructed replay actions; original-state/reconstructed-state restore "
-            "hand joints and piano states frame-by-frame; all runs every mode."
+            "original/reconstructed replay actions; original-state/reconstructed-state replay "
+            "hand joints only and keep piano_states as scoring references; all runs every mode."
         ),
     )
     parser.add_argument("--max-steps", type=int, default=None)
@@ -337,7 +337,8 @@ def main() -> None:
         result = {
             "label": label,
             "song_name": target_song_name,
-            "playback_mode": "recorded_hand_joints_and_piano_states",
+            "playback_mode": "recorded_hand_joints_only_piano_states_scoring_reference",
+            "piano_state_policy": "not_restored_or_used_by_simulator",
             "status": "missing_files",
             "missing_files": missing_files,
             "steps_rendered": 0,
@@ -347,31 +348,23 @@ def main() -> None:
         save_json(rollout_dir / f"{label}_playback.json", result)
         return result
 
-    state_jobs: list[tuple[str, np.ndarray, np.ndarray]] = []
+    state_jobs: list[tuple[str, np.ndarray, np.ndarray | None]] = []
     if args.which in {"original-state", "all"}:
-        if reference_hand_joints is None or reference_piano_states is None:
-            missing = [
-                name
-                for name, arr in [
-                    ("target_trajectory.npz:hand_joints", reference_hand_joints),
-                    ("target_trajectory.npz:piano_states", reference_piano_states),
-                ]
-                if arr is None
-            ]
-            results.append(_missing_state_result("original_state", missing))
+        if reference_hand_joints is None:
+            results.append(_missing_state_result("original_state", ["target_trajectory.npz:hand_joints"]))
         else:
             state_jobs.append(("original_state", reference_hand_joints, reference_piano_states))
     if args.which in {"reconstructed-state", "all"}:
         hand_path = recon_dir / "reconstructed_hand_joints.npy"
         piano_path = recon_dir / "reconstructed_piano_states.npy"
-        missing = [str(path) for path in [hand_path, piano_path] if not path.exists()]
+        missing = [str(hand_path)] if not hand_path.exists() else []
         if missing:
             results.append(_missing_state_result("reconstructed_state", missing))
         else:
             state_jobs.append((
                 "reconstructed_state",
                 np.load(hand_path),
-                np.load(piano_path),
+                np.load(piano_path) if piano_path.exists() else None,
             ))
 
     for label, hand_joints, piano_states in state_jobs:

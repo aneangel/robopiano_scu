@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Set MuJoCo gravity to zero before dense direct-pose playback.",
     )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Score playback without rendering frames or writing a video.",
+    )
     return parser
 
 
@@ -151,6 +156,7 @@ def render_dense_playback(
     active_window_preroll_s: float = 0.5,
     active_window_postroll_s: float = 0.25,
     disable_gravity: bool = False,
+    capture_video: bool = True,
 ) -> dict[str, Any]:
     npz_path = Path(trajectory_npz).expanduser().resolve()
     out_dir = Path(output_dir).expanduser().resolve() if output_dir else npz_path.parent / "render_200fps"
@@ -235,7 +241,7 @@ def render_dense_playback(
             if activation is None:
                 activation = np.asarray(getattr(piano, "activation"), dtype=np.float32).reshape(-1)[:88]
             played_roll.append(np.asarray(activation[:88], dtype=np.float32))
-            if render_error is None:
+            if bool(capture_video) and render_error is None:
                 try:
                     frames.append(render_frame(env, height=int(height), width=int(width)))
                 except Exception as exc:
@@ -310,7 +316,7 @@ def render_dense_playback(
     video_path = None
     video_format = None
     video_audio_warning = None
-    if render_error is None and frames:
+    if bool(capture_video) and render_error is None and frames:
         video_path, video_format, video_audio_warning = write_video(frames, out_dir / "rollout_video.mp4", fps=int(fps), audio_events=events)
     summary: dict[str, Any] = {
         "trajectory_npz": str(npz_path),
@@ -327,6 +333,7 @@ def render_dense_playback(
         "video_audio_warning": video_audio_warning,
         "render_error": render_error,
         "disable_gravity": bool(disable_gravity),
+        "capture_video": bool(capture_video),
         "gravity_error": gravity_error,
         "attraction_forces": "none_in_direct_hand_state_playback",
         "rendered_frames": int(len(frames)),
@@ -362,6 +369,7 @@ def main() -> None:
         active_window_preroll_s=float(args.active_window_preroll_s),
         active_window_postroll_s=float(args.active_window_postroll_s),
         disable_gravity=bool(args.disable_gravity),
+        capture_video=not bool(args.no_video),
     )
     print(f"Wrote Impromptu dense playback render: {summary.get('video_path')}")
     print(

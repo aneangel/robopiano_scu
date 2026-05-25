@@ -33,6 +33,33 @@ class BagatelleConfig:
     ik_xtol: float = 1e-5
     ik_gtol: float = 1e-5
     residual_success_threshold: float = 0.02
+    # Retry failed press-pose IK from forearm seeds ranked by fingertip target
+    # distance. This keeps the common online path single-solve, but avoids
+    # accepting bad local minima on wide or polyphonic chords.
+    ik_multistart_on_failure: bool = True
+    ik_multistart_seed_count: int = 2
+    ik_multistart_forearm_tx_grid: int = 5
+    ik_static_contact_validation: bool = False
+    ik_static_contact_settle_steps: int = 1
+    ik_static_contact_wrong_key_weight: float = 1.0
+    ik_static_contact_missed_key_weight: float = 2.0
+    ik_static_contact_residual_weight: float = 10.0
+    ik_static_contact_failure_weight: float = 25.0
+
+    # Optional RP1M-derived Rhapsody IK seed. This does not replace the
+    # physics-backed IK/contact validation; it proposes an initial hand state
+    # for the existing least-squares solve.
+    rhapsody_ik_enabled: bool = False
+    rhapsody_ik_checkpoint: str = ""
+    rhapsody_ik_refinement_steps: int = 0
+    rhapsody_ik_refinement_lr: float = 0.05
+    rhapsody_ik_device: str = "cpu"
+    rhapsody_ik_candidate_scoring: bool = False
+    rhapsody_ik_coordinate_transform: str = "bagatelle_to_rp1m"
+    rhapsody_ik_y_offset: float = 0.08289646
+    rhapsody_ik_fill_inactive_from_previous: bool = True
+    rhapsody_ik_seed_max_active_error: float = 0.08
+    rhapsody_ik_seed_require_previous_improvement: bool = True
 
     # RoboPianist's fingering reward uses this same key contact heuristic.
     key_target_front_offset: float = 0.35
@@ -55,6 +82,9 @@ class BagatelleConfig:
     large_jump_penalty: float = 0.0
     same_key_same_finger_bonus: float = 0.0
     wrong_hand_split_key: int = 44
+    assignment_dynamic_hand_split: bool = False
+    assignment_dynamic_hand_split_min_span: int = 12
+    assignment_dynamic_hand_split_min_keys: int = 3
     large_jump_distance_m: float = 0.06
     finger_crossing_slack_m: float = 0.005
 

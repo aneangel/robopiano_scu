@@ -125,12 +125,57 @@ def hand_zone_penalty(finger_index: int, key_index: int, config: object | None) 
     middle_key = int(getattr(config, "assignment_middle_key", 44))
     wrong_hand_penalty = float(getattr(config, "assignment_wrong_hand_penalty", 1.0))
     hard_split = bool(getattr(config, "assignment_hard_hand_split", False))
+    return hand_zone_penalty_for_split(
+        finger_index,
+        key_index,
+        middle_key=middle_key,
+        wrong_hand_penalty=wrong_hand_penalty,
+        hard_split=hard_split,
+    )
+
+
+def hand_zone_penalty_for_split(
+    finger_index: int,
+    key_index: int,
+    *,
+    middle_key: int,
+    wrong_hand_penalty: float,
+    hard_split: bool,
+) -> float:
     on_low_side = int(key_index) < middle_key
     if is_left_finger(finger_index) and not on_low_side:
         return 1e6 if hard_split else wrong_hand_penalty
     if is_right_finger(finger_index) and on_low_side:
         return 1e6 if hard_split else wrong_hand_penalty
     return 0.0
+
+
+def dynamic_hand_split_key(keys: np.ndarray, config: object | None, *, default_split_key: int) -> int:
+    if config is None or not bool(getattr(config, "assignment_dynamic_hand_split", False)):
+        return int(default_split_key)
+    values = np.unique(np.asarray(keys, dtype=np.int32).reshape(-1))
+    values.sort()
+    min_keys = max(int(getattr(config, "assignment_dynamic_hand_split_min_keys", 3)), 2)
+    min_span = max(int(getattr(config, "assignment_dynamic_hand_split_min_span", 12)), 1)
+    if values.size < min_keys or int(values[-1] - values[0]) < min_span:
+        return int(default_split_key)
+    gaps = np.diff(values)
+    if gaps.size == 0:
+        return int(default_split_key)
+    max_gap = int(np.max(gaps))
+    candidates = np.flatnonzero(gaps == max_gap)
+    center = (values.size - 1) / 2.0
+    gap_index = int(
+        sorted(
+            candidates.tolist(),
+            key=lambda index: (abs((float(index) + 0.5) - center), -int(index)),
+        )[0]
+    )
+    low = int(values[gap_index])
+    high = int(values[gap_index + 1])
+    if high <= low:
+        return int(default_split_key)
+    return int((low + high) // 2)
 
 
 def finger_zone_penalty(
@@ -147,7 +192,7 @@ def finger_zone_penalty(
     position = int(np.searchsorted(sorted_keys, int(key_index), side="left"))
     normalized = float(position) / float(max(sorted_keys.size - 1, 1))
     if is_left_finger(finger_index):
-        target = float(finger_index) / 4.0
+        target = float(4 - finger_index) / 4.0
     else:
         target = float(finger_index - 5) / 4.0
     return abs(normalized - target)
@@ -281,7 +326,11 @@ def _continuity_cost_matrix(
     wrong_hand_penalty = float(getattr(config, "wrong_hand_penalty", 0.0))
     large_jump_penalty = float(getattr(config, "large_jump_penalty", 0.0))
     same_key_same_finger_bonus = float(getattr(config, "same_key_same_finger_bonus", 0.0))
-    split_key = int(getattr(config, "wrong_hand_split_key", 44))
+    split_key = dynamic_hand_split_key(
+        keys,
+        config,
+        default_split_key=int(getattr(config, "wrong_hand_split_key", 44)),
+    )
     jump_distance = max(float(getattr(config, "large_jump_distance_m", 0.06)), 1e-6)
     crossing_slack = max(float(getattr(config, "finger_crossing_slack_m", 0.005)), 0.0)
 
@@ -369,7 +418,18 @@ def build_composite_assignment_cost(
 
     for finger_index in range(NUM_FINGERS):
         for key_position, key in enumerate(np.asarray(keys, dtype=np.int32).tolist()):
-            components["hand_zone"][finger_index, key_position] = hand_zone_penalty(finger_index, key, config)
+            middle_key = dynamic_hand_split_key(
+                keys,
+                config,
+                default_split_key=int(getattr(config, "assignment_middle_key", 44)),
+            )
+            components["hand_zone"][finger_index, key_position] = hand_zone_penalty_for_split(
+                finger_index,
+                key,
+                middle_key=middle_key,
+                wrong_hand_penalty=float(getattr(config, "assignment_wrong_hand_penalty", 1.0)),
+                hard_split=bool(getattr(config, "assignment_hard_hand_split", False)),
+            )
             components["finger_zone"][finger_index, key_position] = finger_zone_penalty(
                 finger_index,
                 key,
@@ -566,7 +626,11 @@ def assignment_crossing_penalty(
         hand_keys = keys[hand_mask]
         if hand_fingers.size <= 1:
             continue
-        order = np.argsort(hand_fingers, kind="stable")
+        if hand == LEFT_HAND_FINGERS:
+            ranks = np.asarray([4 - int(finger) for finger in hand_fingers], dtype=np.int32)
+        else:
+            ranks = np.asarray([int(finger) - 5 for finger in hand_fingers], dtype=np.int32)
+        order = np.argsort(ranks, kind="stable")
         ordered_keys = hand_keys[order]
         for left_index in range(ordered_keys.size):
             for right_index in range(left_index + 1, ordered_keys.size):
@@ -604,26 +668,19 @@ def _crossed_selected_pairs(result: FingerAssignmentResult) -> list[tuple[int, i
         hand_fingers = fingers[hand_mask]
         hand_keys = keys[hand_mask]
         hand_positions = key_positions[hand_mask]
-        for left_index in range(hand_fingers.size):
-            for right_index in range(left_index + 1, hand_fingers.size):
-                left_finger = int(hand_fingers[left_index])
-                right_finger = int(hand_fingers[right_index])
-                if left_finger == right_finger:
-                    continue
-                if left_finger > right_finger:
-                    left_finger, right_finger = right_finger, left_finger
-                    left_key = int(hand_keys[right_index])
-                    right_key = int(hand_keys[left_index])
-                    left_position = int(hand_positions[right_index])
-                    right_position = int(hand_positions[left_index])
-                else:
-                    left_key = int(hand_keys[left_index])
-                    right_key = int(hand_keys[right_index])
-                    left_position = int(hand_positions[left_index])
-                    right_position = int(hand_positions[right_index])
-                if left_key > right_key:
-                    pairs.append((left_finger, left_position))
-                    pairs.append((right_finger, right_position))
+        if hand == LEFT_HAND_FINGERS:
+            ranks = np.asarray([4 - int(finger) for finger in hand_fingers], dtype=np.int32)
+        else:
+            ranks = np.asarray([int(finger) - 5 for finger in hand_fingers], dtype=np.int32)
+        order = np.argsort(ranks, kind="stable")
+        ordered_fingers = hand_fingers[order]
+        ordered_keys = hand_keys[order]
+        ordered_positions = hand_positions[order]
+        for left_index in range(ordered_fingers.size):
+            for right_index in range(left_index + 1, ordered_fingers.size):
+                if int(ordered_keys[left_index]) > int(ordered_keys[right_index]):
+                    pairs.append((int(ordered_fingers[left_index]), int(ordered_positions[left_index])))
+                    pairs.append((int(ordered_fingers[right_index]), int(ordered_positions[right_index])))
     return pairs
 
 

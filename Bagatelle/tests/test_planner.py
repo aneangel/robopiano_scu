@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from bagatelle.config import BagatelleConfig  # noqa: E402
+from bagatelle.assignment import assignment_crossing_penalty, dynamic_hand_split_key, finger_zone_penalty  # noqa: E402
 from bagatelle.kinematics import BagatelleKinematics, IKResult  # noqa: E402
 from bagatelle.planner import IK_METRIC_COLUMNS, plan_target_keys  # noqa: E402
 
@@ -185,3 +186,31 @@ def test_inactive_wrong_key_clearance_residual_only_penalizes_near_low_fingers()
     assert residual.reshape(3, 1)[0, 0] > 0.0
     assert residual.reshape(3, 1)[1, 0] == 0.0
     assert residual.reshape(3, 1)[2, 0] == 0.0
+
+
+def test_dynamic_hand_split_uses_middle_gap_for_wide_chord() -> None:
+    config = BagatelleConfig(
+        assignment_dynamic_hand_split=True,
+        assignment_dynamic_hand_split_min_span=12,
+        assignment_dynamic_hand_split_min_keys=3,
+    )
+
+    split = dynamic_hand_split_key(np.asarray([28, 35, 37, 44], dtype=np.int32), config, default_split_key=48)
+
+    assert split == 40
+
+
+def test_left_hand_crossing_and_finger_zone_use_physical_finger_order() -> None:
+    correct_left = assignment_crossing_penalty(
+        np.asarray([4, 0], dtype=np.int32),
+        np.asarray([34, 46], dtype=np.int32),
+    )
+    crossed_left = assignment_crossing_penalty(
+        np.asarray([0, 4], dtype=np.int32),
+        np.asarray([34, 46], dtype=np.int32),
+    )
+
+    assert correct_left == 0.0
+    assert crossed_left > 0.0
+    assert finger_zone_penalty(4, 34, np.asarray([34, 46], dtype=np.int32), None) == 0.0
+    assert finger_zone_penalty(0, 46, np.asarray([34, 46], dtype=np.int32), None) == 0.0

@@ -665,9 +665,7 @@ def build_primitive_instances(
                         hand_fingertips_gt=_as_float_array(arrays["hand_fingertips"]),
                         joint_velocities_gt=_as_float_array(arrays["joint_velocities"]),
                         source_midi_path=_optional_string(manifest_row.get("note_path")),
-                        start_piano_state=_first_frame(
-                            arrays["piano_states"] if arrays["piano_states"] is not None else arrays["goals"]
-                        ),
+                        start_piano_state=None,
                         target_source=str(intended_bundle.source),
                     )
                 )
@@ -926,8 +924,8 @@ def rollout_primitive_instance(
     if restore_mode == "unsafe_legacy":
         causal_config = CausalRolloutConfig.from_mapping({"enabled": False, "restore_mode": "unsafe_legacy"})
         LOGGER.warning(
-            "UNSAFE LEGACY PRIMITIVE EVALUATION ENABLED: dataset task/piano/goal state may be restored; "
-            "all outputs from this mode are marked causal_validated=false."
+            "UNSAFE LEGACY PRIMITIVE EVALUATION ENABLED: task/hand state may be restored; "
+            "dataset piano states are not restored and outputs are marked causal_validated=false."
         )
     source = resolve_instance_rollout_source(
         instance=instance,
@@ -1070,7 +1068,8 @@ def rollout_primitive_instance(
                 status="unsafe_legacy_eval",
             )
             notes.append(
-                "WARNING: restore_mode=unsafe_legacy restores task/piano/goal state and is not causal-valid."
+                "WARNING: restore_mode=unsafe_legacy restores task/hand state and is not causal-valid; "
+                "dataset piano states are not restored."
             )
         video_path = None
         video_format = None
@@ -1527,7 +1526,7 @@ def restore_instance_state_unsafe_legacy(env: Any, instance: PrimitiveInstance) 
     if _restore_hand_state(task=task, physics=physics, instance=instance):
         restore_mode = "direct_hand_state_restore"
     if _restore_piano_state_unsafe_legacy(task=task, physics=physics, instance=instance):
-        restore_mode = "direct_state_restore"
+        notes.append("Dataset piano-state restore was requested but skipped; piano activation is simulation-only.")
     if hasattr(physics, "forward"):
         physics.forward()
     piano = getattr(task, "piano", None)
@@ -2623,22 +2622,7 @@ def _restore_hand_state(*, task: Any, physics: Any, instance: PrimitiveInstance)
 
 
 def _restore_piano_state_unsafe_legacy(*, task: Any, physics: Any, instance: PrimitiveInstance) -> bool:
-    if instance.start_piano_state is None:
-        return False
-    piano = getattr(task, "piano", None)
-    if piano is None or not hasattr(piano, "joints"):
-        return False
-    state = np.asarray(instance.start_piano_state, dtype=np.float32).reshape(-1)
-    key_state = np.zeros((_NUM_PIANO_KEYS,), dtype=np.float32)
-    width = min(state.shape[0], _NUM_PIANO_KEYS)
-    key_state[:width] = state[:width]
-    qpos_range = getattr(piano, "_qpos_range", None)
-    if qpos_range is None:
-        return False
-    physics.bind(piano.joints).qpos = np.asarray(key_state, dtype=np.float32) * np.asarray(qpos_range[:, 1], dtype=np.float32)
-    if state.shape[0] > _NUM_PIANO_KEYS and hasattr(piano, "_sustain_state"):
-        piano._sustain_state[0] = float(np.clip(state[_NUM_PIANO_KEYS], 0.0, 1.0))
-    return True
+    return False
 
 
 def _capture_piano_state(env: Any) -> np.ndarray:

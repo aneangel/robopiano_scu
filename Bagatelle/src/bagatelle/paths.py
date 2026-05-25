@@ -16,6 +16,7 @@ def ensure_repo_paths() -> Path:
         repo / "Bagatelle" / "src",
         repo / "Etude" / "src",
         repo / "Intermezzo" / "src",
+        repo / "Rhapsody" / "src",
         repo / "Variations" / "src",
         repo / "Variations",
         repo / "partita" / "src",

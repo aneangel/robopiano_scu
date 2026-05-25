@@ -46,7 +46,7 @@ MAGNET_DEFAULTS: dict[str, Any] = {
     "release_end_weight": 0.05,
     "inactive_clearance_weight": 1.0,
     "wrong_key_avoid_weight": 0.5,
-    "key_press_depth": 0.0065,
+    "key_press_depth": 0.0035,
     "clearance_height": 0.040,
     "press_lead_s": 0.010,
 }
@@ -68,7 +68,7 @@ MAGNET_GRID: dict[str, list[float]] = {
     "release_end_weight": [0.00, 0.05, 0.10],
     "inactive_clearance_weight": [0.5, 1.0, 1.5],
     "wrong_key_avoid_weight": [0.0, 0.5, 1.0],
-    "key_press_depth": [0.0055, 0.0065, 0.0075],
+    "key_press_depth": [0.0035, 0.0050, 0.0060],
     "clearance_height": [0.035, 0.040, 0.050],
     "press_lead_s": [0.000, 0.010, 0.020],
 }

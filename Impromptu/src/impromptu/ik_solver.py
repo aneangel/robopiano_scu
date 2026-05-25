@@ -147,6 +147,20 @@ def solve_fingertip_frame(
             threshold=float(config.residual_success_threshold),
         )
 
+    if bool(getattr(config, "rhapsody_ik_enabled", False)) and hasattr(kin, "rhapsody_seed_for_fingertips"):
+        try:
+            initial = _clip_qpos(
+                kin,
+                kin.rhapsody_seed_for_fingertips(
+                    targets,
+                    mask.astype(np.float32),
+                    previous,
+                    config=config,
+                ),
+            )
+        except Exception:
+            pass
+
     target_positions = targets[finger_indices.astype(np.int64)].astype(np.float32)
     active_weights = weights[finger_indices.astype(np.int64)].astype(np.float64)
     press_weight = max(float(config.press_weight), 1e-8)

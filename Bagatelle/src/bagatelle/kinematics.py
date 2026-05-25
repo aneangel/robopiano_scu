@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import ctypes
 import os
 import tempfile
@@ -25,6 +25,10 @@ JOINT_INDEX_RANGES_BY_HAND = {
 FINGER_HAND_LABELS = ("left", "left", "left", "left", "left", "right", "right", "right", "right", "right")
 FINGER_NAMES = ("thumb", "index", "middle", "ring", "little", "thumb", "index", "middle", "ring", "little")
 UNASSIGNED_FINGERTIP_STRATEGIES = ("legacy", "avoid_mispresses")
+RIGHT_FOREARM_TX_INDEX = 21
+RIGHT_FOREARM_TY_INDEX = 22
+LEFT_FOREARM_TX_INDEX = 44
+LEFT_FOREARM_TY_INDEX = 45
 
 
 def _model_element_name(element: Any) -> str:
@@ -57,6 +61,11 @@ class IKResult:
     assigned_keys: np.ndarray
     assigned_finger_indices: np.ndarray
     unassigned_keys: np.ndarray
+    contact_validation_used: bool = False
+    contact_target_hit_count: int = 0
+    contact_wrong_key_count: int = 0
+    contact_missed_key_count: int = 0
+    contact_played_key_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +82,11 @@ class IKResult:
             "optimizer_message": str(self.optimizer_message),
             "optimizer_cost": float(self.optimizer_cost),
             "nfev": int(self.nfev),
+            "contact_validation_used": bool(self.contact_validation_used),
+            "contact_target_hit_count": int(self.contact_target_hit_count),
+            "contact_wrong_key_count": int(self.contact_wrong_key_count),
+            "contact_missed_key_count": int(self.contact_missed_key_count),
+            "contact_played_key_count": int(self.contact_played_key_count),
         }
 
 
@@ -160,6 +174,15 @@ class BagatelleKinematics:
         self._repair_bounds()
         self.neutral_qpos = self.current_qpos()
         self.neutral_fingertips = self.current_fingertips()
+        self._rhapsody_solver = None
+        self._rhapsody_checkpoint = ""
+        self._rhapsody_device = "cpu"
+        self._zero_action = None
+        try:
+            action_spec = self.env.action_spec()
+            self._zero_action = np.zeros(action_spec.shape, dtype=action_spec.dtype)
+        except Exception:
+            self._zero_action = None
 
     def close(self) -> None:
         close = getattr(getattr(self, "env", None), "close", None)
@@ -261,6 +284,73 @@ class BagatelleKinematics:
         self._set_qpos(qpos)
         return self.current_fingertips()
 
+    def _reset_piano_to_inactive(self) -> None:
+        qpos_range = getattr(self.piano, "_qpos_range", None)
+        joints = getattr(self.piano, "joints", None)
+        if qpos_range is not None and joints is not None:
+            ranges = np.asarray(qpos_range, dtype=np.float64)
+            inactive = np.maximum(ranges[:, 0], 0.0)
+            self.physics.bind(joints).qpos = inactive
+        sustain_state = getattr(self.piano, "_sustain_state", None)
+        if sustain_state is not None:
+            try:
+                sustain_state[0] = 0.0
+            except Exception:
+                pass
+        if hasattr(self.physics, "forward"):
+            self.physics.forward()
+        update_key_state = getattr(self.piano, "_update_key_state", None)
+        if callable(update_key_state):
+            update_key_state(self.physics)
+        update_key_color = getattr(self.piano, "_update_key_color", None)
+        if callable(update_key_color):
+            update_key_color(self.physics)
+
+    def activation_for_qpos(self, qpos: np.ndarray, *, settle_steps: int = 1) -> np.ndarray:
+        self._reset_piano_to_inactive()
+        steps = max(int(settle_steps), 1)
+        for _ in range(steps):
+            self._set_qpos(qpos)
+            if self._zero_action is not None:
+                self.env.step(self._zero_action)
+            elif hasattr(self.physics, "forward"):
+                self.physics.forward()
+        update_key_state = getattr(self.piano, "_update_key_state", None)
+        if callable(update_key_state):
+            update_key_state(self.physics)
+        update_key_color = getattr(self.piano, "_update_key_color", None)
+        if callable(update_key_color):
+            update_key_color(self.physics)
+        activation = getattr(self.piano, "activation", None)
+        if activation is None:
+            return np.zeros((int(self.piano.n_keys),), dtype=np.float32)
+        return np.asarray(activation, dtype=np.float32).reshape(-1)[: int(self.piano.n_keys)].astype(np.float32)
+
+    def static_contact_metrics(
+        self,
+        qpos: np.ndarray,
+        assigned_keys: np.ndarray,
+        *,
+        threshold: float,
+        settle_steps: int,
+    ) -> dict[str, int]:
+        activation = self.activation_for_qpos(qpos, settle_steps=settle_steps)
+        played = activation[: int(self.piano.n_keys)] > float(threshold)
+        assigned = np.zeros((int(self.piano.n_keys),), dtype=bool)
+        keys = np.asarray(assigned_keys, dtype=np.int32).reshape(-1)
+        valid = keys[(keys >= 0) & (keys < int(self.piano.n_keys))]
+        if valid.size:
+            assigned[valid.astype(np.int64)] = True
+        hits = np.logical_and(played, assigned)
+        wrong = np.logical_and(played, ~assigned)
+        missed = np.logical_and(~played, assigned)
+        return {
+            "target_hit_count": int(np.count_nonzero(hits)),
+            "wrong_key_count": int(np.count_nonzero(wrong)),
+            "missed_key_count": int(np.count_nonzero(missed)),
+            "played_key_count": int(np.count_nonzero(played)),
+        }
+
     def _key_targets(self, keys: np.ndarray | None, *, press_depth: float) -> np.ndarray:
         if keys is None:
             key_indices = np.arange(88, dtype=np.int32)
@@ -304,6 +394,193 @@ class BagatelleKinematics:
         proximity = np.maximum(radius_value - xy_distance, 0.0) / radius_value
         vertical_deficit = np.maximum(float(clearance_z) - fingertips[:, 2], 0.0)
         return (proximity * vertical_deficit[:, None]).reshape(-1).astype(np.float64)
+
+    def _ranked_press_pose_initial_seeds(
+        self,
+        *,
+        previous: np.ndarray,
+        neutral: np.ndarray,
+        finger_indices: np.ndarray,
+        target_positions: np.ndarray,
+        config: BagatelleConfig,
+    ) -> list[np.ndarray]:
+        seed_count = max(int(getattr(config, "ik_multistart_seed_count", 4)), 1)
+        grid_count = max(int(getattr(config, "ik_multistart_forearm_tx_grid", 5)), 2)
+        base_rows = [self.clip_qpos(previous), self.clip_qpos(neutral)]
+        active_left = bool(np.any(np.asarray(finger_indices, dtype=np.int64) < 5))
+        active_right = bool(np.any(np.asarray(finger_indices, dtype=np.int64) >= 5))
+        tx_options: dict[str, np.ndarray] = {}
+        if active_left:
+            tx_options["left"] = np.linspace(
+                float(self.joint_lower[LEFT_FOREARM_TX_INDEX]),
+                float(self.joint_upper[LEFT_FOREARM_TX_INDEX]),
+                grid_count,
+                dtype=np.float32,
+            )
+        if active_right:
+            tx_options["right"] = np.linspace(
+                float(self.joint_lower[RIGHT_FOREARM_TX_INDEX]),
+                float(self.joint_upper[RIGHT_FOREARM_TX_INDEX]),
+                grid_count,
+                dtype=np.float32,
+            )
+
+        candidates: list[np.ndarray] = []
+        candidates.extend(base_rows)
+        for base in base_rows:
+            left_values = tx_options.get("left", np.asarray([base[LEFT_FOREARM_TX_INDEX]], dtype=np.float32))
+            right_values = tx_options.get("right", np.asarray([base[RIGHT_FOREARM_TX_INDEX]], dtype=np.float32))
+            for left_tx in left_values:
+                for right_tx in right_values:
+                    row = np.asarray(base, dtype=np.float32).copy()
+                    if active_left:
+                        row[LEFT_FOREARM_TX_INDEX] = np.float32(left_tx)
+                        row[LEFT_FOREARM_TY_INDEX] = np.float32(
+                            max(float(row[LEFT_FOREARM_TY_INDEX]), float(neutral[LEFT_FOREARM_TY_INDEX]))
+                        )
+                    if active_right:
+                        row[RIGHT_FOREARM_TX_INDEX] = np.float32(right_tx)
+                        row[RIGHT_FOREARM_TY_INDEX] = np.float32(
+                            max(float(row[RIGHT_FOREARM_TY_INDEX]), float(neutral[RIGHT_FOREARM_TY_INDEX]))
+                        )
+                    candidates.append(self.clip_qpos(row))
+
+        scored: list[tuple[float, tuple[float, ...], np.ndarray]] = []
+        seen: set[bytes] = set()
+        targets = np.asarray(target_positions, dtype=np.float32)
+        fingers = np.asarray(finger_indices, dtype=np.int64)
+        for row in candidates:
+            key = np.round(row.astype(np.float32), 5).tobytes()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                fingertips = self.fingertip_positions_for_qpos(row)
+                if fingers.size and targets.size:
+                    distances = np.linalg.norm(fingertips[fingers] - targets, axis=1)
+                    max_distance = float(np.max(distances))
+                    score = float(np.linalg.norm(distances))
+                else:
+                    max_distance = 0.0
+                    score = 0.0
+            except Exception:
+                max_distance = float("inf")
+                score = float("inf")
+            scored.append((score, (max_distance, *row.astype(float).tolist()), row))
+        scored.sort(key=lambda item: (float(item[0]), item[1]))
+        return [row.astype(np.float32) for _score, _tie, row in scored[:seed_count]]
+
+    def _load_rhapsody_solver(self, config: BagatelleConfig):
+        checkpoint = str(getattr(config, "rhapsody_ik_checkpoint", "") or "")
+        if not checkpoint:
+            raise ValueError("rhapsody_ik_checkpoint must be set when rhapsody_ik_enabled is true")
+        device = str(getattr(config, "rhapsody_ik_device", "cpu") or "cpu")
+        if (
+            self._rhapsody_solver is not None
+            and self._rhapsody_checkpoint == checkpoint
+            and self._rhapsody_device == device
+        ):
+            return self._rhapsody_solver
+        from rhapsody.solver import RhapsodyIKSolver
+
+        self._rhapsody_solver = RhapsodyIKSolver.from_checkpoint(checkpoint, device=device)
+        self._rhapsody_checkpoint = checkpoint
+        self._rhapsody_device = device
+        return self._rhapsody_solver
+
+    def rhapsody_seed_for_fingertips(
+        self,
+        target_fingertips: np.ndarray,
+        active_mask: np.ndarray,
+        previous_qpos: np.ndarray,
+        *,
+        config: BagatelleConfig | None = None,
+    ) -> np.ndarray:
+        cfg = config or self.config
+        if not bool(getattr(cfg, "rhapsody_ik_enabled", False)):
+            raise ValueError("Rhapsody IK is not enabled")
+        solver = self._load_rhapsody_solver(cfg)
+        previous = self.clip_qpos(previous_qpos)
+        targets = np.asarray(target_fingertips, dtype=np.float32).reshape(NUM_FINGERS, 3).copy()
+        mask = np.asarray(active_mask, dtype=np.float32).reshape(NUM_FINGERS).copy()
+        if bool(getattr(cfg, "rhapsody_ik_fill_inactive_from_previous", True)):
+            inactive = mask <= 0.0
+            if bool(np.any(inactive)):
+                previous_tips = np.asarray(self.fingertip_positions_for_qpos(previous), dtype=np.float32).reshape(NUM_FINGERS, 3)
+                targets[inactive] = previous_tips[inactive]
+            mask = np.ones((NUM_FINGERS,), dtype=np.float32)
+        target_for_solver, mask_for_solver = self._rhapsody_target_transform(
+            targets,
+            mask,
+            cfg,
+        )
+        solution = solver.solve(
+            target_for_solver,
+            active_mask=mask_for_solver,
+            previous_qpos=previous,
+            refinement_steps=max(int(getattr(cfg, "rhapsody_ik_refinement_steps", 16)), 0),
+            refinement_lr=float(getattr(cfg, "rhapsody_ik_refinement_lr", 0.05)),
+        )
+        return self.clip_qpos(solution.qpos)
+
+    @staticmethod
+    def _rhapsody_target_transform(
+        target_fingertips: np.ndarray,
+        active_mask: np.ndarray,
+        config: BagatelleConfig,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        targets = np.asarray(target_fingertips, dtype=np.float32).reshape(NUM_FINGERS, 3)
+        mask = np.asarray(active_mask, dtype=np.float32).reshape(NUM_FINGERS)
+        mode = str(getattr(config, "rhapsody_ik_coordinate_transform", "bagatelle_to_rp1m"))
+        if mode in ("", "none"):
+            return targets.copy(), mask.copy()
+        if mode != "bagatelle_to_rp1m":
+            raise ValueError(f"Unsupported Rhapsody target transform: {mode!r}")
+        transformed = np.empty_like(targets, dtype=np.float32)
+        transformed[:5] = targets[5:]
+        transformed[5:] = targets[:5]
+        transformed[:, 1] += np.float32(float(getattr(config, "rhapsody_ik_y_offset", 0.08289646)))
+        transformed_mask = np.concatenate([mask[5:], mask[:5]], axis=0).astype(np.float32)
+        return transformed.astype(np.float32), transformed_mask
+
+    def _rhapsody_press_pose_seed(
+        self,
+        assignments: FingerAssignmentResult,
+        previous_qpos: np.ndarray,
+        config: BagatelleConfig,
+    ) -> np.ndarray | None:
+        if not bool(getattr(config, "rhapsody_ik_enabled", False)) or assignments.count == 0:
+            return None
+        targets = np.full((NUM_FINGERS, 3), np.nan, dtype=np.float32)
+        active = np.zeros((NUM_FINGERS,), dtype=np.float32)
+        fingers = assignments.assigned_finger_indices.astype(np.int64)
+        targets[fingers] = assignments.target_positions.astype(np.float32)
+        active[fingers] = 1.0
+        try:
+            seed = self.clip_qpos(self.rhapsody_seed_for_fingertips(targets, active, previous_qpos, config=config))
+        except Exception:
+            return None
+        active_targets = assignments.target_positions.astype(np.float32)
+        try:
+            seed_tips = np.asarray(self.fingertip_positions_for_qpos(seed), dtype=np.float32)
+            seed_errors = np.linalg.norm(seed_tips[fingers] - active_targets, axis=1)
+        except Exception:
+            return None
+        if not np.all(np.isfinite(seed_errors)):
+            return None
+        max_allowed = float(getattr(config, "rhapsody_ik_seed_max_active_error", 0.08))
+        if max_allowed > 0.0 and float(np.max(seed_errors)) > max_allowed:
+            return None
+        if bool(getattr(config, "rhapsody_ik_seed_require_previous_improvement", True)):
+            try:
+                previous = self.clip_qpos(previous_qpos)
+                previous_tips = np.asarray(self.fingertip_positions_for_qpos(previous), dtype=np.float32)
+                previous_errors = np.linalg.norm(previous_tips[fingers] - active_targets, axis=1)
+                if float(np.mean(seed_errors)) >= float(np.mean(previous_errors)):
+                    return None
+            except Exception:
+                return None
+        return seed
 
     def solve_press_pose(
         self,
@@ -393,10 +670,10 @@ class BagatelleKinematics:
                 parts.append(avoid_error.reshape(-1) * wrong_key_weight)
             return np.concatenate(parts, axis=0).astype(np.float64)
 
-        try:
+        def solve_from_seed(seed: np.ndarray, *, seed_index: int) -> IKResult:
             opt = least_squares(
                 residual,
-                x0.astype(np.float64),
+                self.clip_qpos(seed).astype(np.float64),
                 bounds=(self.joint_lower.astype(np.float64), self.joint_upper.astype(np.float64)),
                 max_nfev=max(int(cfg.ik_max_nfev), 1),
                 ftol=float(cfg.ik_ftol),
@@ -411,11 +688,92 @@ class BagatelleKinematics:
                 assignments,
                 optimizer_success=bool(opt.success),
                 optimizer_status=int(opt.status),
-                optimizer_message=str(opt.message),
+                optimizer_message=f"seed={seed_index}: {opt.message}",
                 optimizer_cost=float(opt.cost),
                 nfev=int(opt.nfev),
                 threshold=float(cfg.residual_success_threshold),
             )
+
+        validate_static_contacts = bool(getattr(cfg, "ik_static_contact_validation", False))
+        contact_settle_steps = max(int(getattr(cfg, "ik_static_contact_settle_steps", 1)), 1)
+
+        def with_static_contact_metrics(result: IKResult) -> IKResult:
+            if not validate_static_contacts:
+                return result
+            metrics = self.static_contact_metrics(
+                result.pose,
+                result.assigned_keys,
+                threshold=float(cfg.threshold),
+                settle_steps=contact_settle_steps,
+            )
+            return replace(
+                result,
+                contact_validation_used=True,
+                contact_target_hit_count=int(metrics["target_hit_count"]),
+                contact_wrong_key_count=int(metrics["wrong_key_count"]),
+                contact_missed_key_count=int(metrics["missed_key_count"]),
+                contact_played_key_count=int(metrics["played_key_count"]),
+            )
+
+        def contact_rank(result: IKResult) -> tuple[float, int, int, int, float, float]:
+            if not validate_static_contacts:
+                return (
+                    0.0,
+                    0,
+                    0,
+                    0 if bool(result.success) else 1,
+                    float(result.max_residual),
+                    float(result.residual_norm),
+                )
+            missed = int(result.contact_missed_key_count)
+            wrong = int(result.contact_wrong_key_count)
+            failure = 0 if bool(result.success) else 1
+            score = (
+                float(getattr(cfg, "ik_static_contact_missed_key_weight", 2.0)) * float(missed)
+                + float(getattr(cfg, "ik_static_contact_wrong_key_weight", 1.0)) * float(wrong)
+                + float(getattr(cfg, "ik_static_contact_residual_weight", 10.0)) * float(result.max_residual)
+                + float(getattr(cfg, "ik_static_contact_failure_weight", 25.0)) * float(failure)
+                + (0.0 if bool(result.optimizer_success) else 100.0)
+            )
+            return (float(score), missed, wrong, failure, float(result.max_residual), float(result.residual_norm))
+
+        def residual_rank(result: IKResult) -> tuple[float, float]:
+            return (float(result.max_residual), float(result.residual_norm))
+
+        try:
+            result = with_static_contact_metrics(solve_from_seed(x0, seed_index=0))
+            best = result
+            rhapsody_seed = self._rhapsody_press_pose_seed(assignments, previous, cfg)
+            try_extra_seeds = bool(validate_static_contacts) or (
+                not bool(result.success) and bool(getattr(cfg, "ik_multistart_on_failure", True))
+            ) or rhapsody_seed is not None
+            if not try_extra_seeds:
+                return result
+            extra_seeds: list[np.ndarray] = []
+            if rhapsody_seed is not None:
+                extra_seeds.append(self.clip_qpos(rhapsody_seed))
+            extra_seeds.extend(
+                self._ranked_press_pose_initial_seeds(
+                    previous=previous,
+                    neutral=neutral,
+                    finger_indices=finger_indices,
+                    target_positions=target_positions,
+                    config=cfg,
+                )
+            )
+            for seed_index, seed in enumerate(extra_seeds, start=1):
+                if np.allclose(seed, x0, atol=1e-5, rtol=0.0):
+                    continue
+                candidate = with_static_contact_metrics(solve_from_seed(seed, seed_index=seed_index))
+                if validate_static_contacts:
+                    is_better = contact_rank(candidate) < contact_rank(best)
+                else:
+                    is_better = residual_rank(candidate) < residual_rank(best)
+                if is_better:
+                    best = candidate
+                if not validate_static_contacts and bool(candidate.success):
+                    return candidate
+            return best
         except Exception as exc:
             fingertips = self.fingertip_positions_for_qpos(previous)
             return self._result_from_pose(
@@ -442,6 +800,11 @@ class BagatelleKinematics:
         optimizer_cost: float,
         nfev: int,
         threshold: float,
+        contact_validation_used: bool = False,
+        contact_target_hit_count: int = 0,
+        contact_wrong_key_count: int = 0,
+        contact_missed_key_count: int = 0,
+        contact_played_key_count: int = 0,
     ) -> IKResult:
         if assignments.count:
             distances = np.linalg.norm(
@@ -468,4 +831,9 @@ class BagatelleKinematics:
             assigned_keys=assignments.assigned_keys.copy(),
             assigned_finger_indices=assignments.assigned_finger_indices.copy(),
             unassigned_keys=assignments.unassigned_keys.copy(),
+            contact_validation_used=bool(contact_validation_used),
+            contact_target_hit_count=int(contact_target_hit_count),
+            contact_wrong_key_count=int(contact_wrong_key_count),
+            contact_missed_key_count=int(contact_missed_key_count),
+            contact_played_key_count=int(contact_played_key_count),
         )

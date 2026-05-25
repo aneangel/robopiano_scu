@@ -42,6 +42,7 @@ _KNOWN_TASK_KWARGS: tuple[str, ...] = (
     "primitive_fingertip_collisions",
     "attachment_yaw",
     "change_color_on_activation",
+    "hand_anchor_y_offset",
 )
 
 _KNOWN_SUITE_LOAD_KWARGS: tuple[str, ...] = (
@@ -96,13 +97,13 @@ def main() -> None:
     selection = load_json(data_dir / "selection.json")
     target = _load_target_npz(data_dir)
 
-    if "hand_joints" not in target or "piano_states" not in target:
-        raise RuntimeError("target_trajectory.npz must include hand_joints and piano_states.")
+    if "hand_joints" not in target:
+        raise RuntimeError("target_trajectory.npz must include hand_joints.")
 
     actions = np.asarray(target["actions"], dtype=np.float32)
     goals = np.asarray(target["goals"], dtype=np.float32)
     hand_joints = np.asarray(target["hand_joints"], dtype=np.float32)
-    piano_states = np.asarray(target["piano_states"], dtype=np.float32)
+    piano_states = np.asarray(target["piano_states"], dtype=np.float32) if "piano_states" in target else None
     song_name = selection.get("target_song_name", selection.get("song_name"))
     threshold = float(selection.get("key_threshold", config.get("selection", {}).get("key_threshold", 0.5)))
     control_timestep = float(config.get("control_timestep", 0.05))

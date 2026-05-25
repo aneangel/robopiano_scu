@@ -15,20 +15,23 @@ import numpy as np
 
 from partita.evaluation.metrics import key_metrics
 from partita.utils.io import ensure_dir, save_json
-
-
-ACTION_MAPPINGS: tuple[str, ...] = (
-    "as_is",
-    "swap_hands",
-    "zero_sustain",
-    "invert_sustain",
-    "swap_hands_zero_sustain",
+from rp1m_simulator.simulator import (
+    ACTION_MAPPINGS as RP1M_ACTION_MAPPINGS,
+    ACTION_SOURCE_SCALES as RP1M_ACTION_SOURCE_SCALES,
+    DEFAULT_HAND_ANCHOR_Y_OFFSET,
+    RolloutConfig,
+    make_rp1m_trajectory_from_arrays,
+    simulate_rp1m_rollout,
+    write_goals_proto as rp1m_write_goals_proto,
+    write_video as rp1m_write_video,
 )
 
-ACTION_SOURCE_SCALES: tuple[str, ...] = (
-    "normalized_minus_one_to_one",
-    "actuator_units",
-)
+
+ACTION_MAPPINGS: tuple[str, ...] = tuple(RP1M_ACTION_MAPPINGS)
+ACTION_SOURCE_SCALES: tuple[str, ...] = tuple(RP1M_ACTION_SOURCE_SCALES)
+
+HAND_ANCHOR_Y_OFFSET_TASK_KEY = "hand_anchor_y_offset"
+_HAND_ANCHOR_DEFAULT_POSITIONS: dict[str, tuple[float, float, float]] | None = None
 
 
 def canonicalize_rp1m_environment_name(song_name: str) -> str:
@@ -101,12 +104,7 @@ def goals_to_note_sequence(goals: np.ndarray, *, dt: float = 0.05, title: str = 
 
 
 def write_goals_proto(goals: np.ndarray, path: str | Path, *, dt: float, title: str) -> Path:
-    path = Path(path)
-    ensure_dir(path.parent)
-    seq = goals_to_note_sequence(goals, dt=dt, title=title)
-    with path.open("wb") as f:
-        f.write(seq.SerializeToString())
-    return path
+    return rp1m_write_goals_proto(goals, path, dt=dt, title=title)
 
 
 def _iter_wrapped_envs(env: Any) -> list[Any]:
@@ -143,24 +141,10 @@ def write_video(
     fps: int,
     audio_events: list[Any] | None = None,
 ) -> tuple[Path, str, str | None]:
-    output_path = Path(output_path)
-    ensure_dir(output_path.parent)
-    if not frames:
-        raise ValueError("No frames were captured.")
-    audio_warning = None
-    try:
-        import imageio.v2 as imageio
-
-        imageio.mimwrite(output_path, frames, fps=fps, codec="libx264", quality=7, macro_block_size=None)
-        if audio_events:
-            audio_warning = _attach_keypress_audio(output_path, audio_events)
-        return output_path, "mp4", audio_warning
-    except Exception as mp4_exc:
-        gif_path = output_path.with_suffix(".gif")
-        import imageio.v2 as imageio
-
-        imageio.mimsave(gif_path, frames, fps=fps)
-        return gif_path, f"gif fallback after MP4 failure: {mp4_exc}", None
+    video_path, audio_warning = rp1m_write_video(frames, output_path, fps=fps, audio_events=audio_events)
+    if video_path is None:
+        raise ValueError(audio_warning or "No frames were captured.")
+    return video_path, "mp4", audio_warning
 
 
 
@@ -223,6 +207,31 @@ def _canonical_midi_available(env_name: str) -> bool:
     return env_name in _ROBO_ALL
 
 
+def _apply_hand_anchor_y_offset(offset: float | None) -> dict[str, Any] | None:
+    if offset is None:
+        return None
+    from robopianist.suite.tasks import base as task_base
+
+    global _HAND_ANCHOR_DEFAULT_POSITIONS
+    if _HAND_ANCHOR_DEFAULT_POSITIONS is None:
+        _HAND_ANCHOR_DEFAULT_POSITIONS = {
+            "left": tuple(getattr(task_base, "_LEFT_HAND_POSITION")),
+            "right": tuple(getattr(task_base, "_RIGHT_HAND_POSITION")),
+        }
+    left_default = _HAND_ANCHOR_DEFAULT_POSITIONS["left"]
+    right_default = _HAND_ANCHOR_DEFAULT_POSITIONS["right"]
+    offset_value = float(offset)
+    left_position = (left_default[0], left_default[1] + offset_value, left_default[2])
+    right_position = (right_default[0], right_default[1] + offset_value, right_default[2])
+    task_base._LEFT_HAND_POSITION = left_position
+    task_base._RIGHT_HAND_POSITION = right_position
+    return {
+        "hand_anchor_y_offset": offset_value,
+        "left_hand_position": list(left_position),
+        "right_hand_position": list(right_position),
+    }
+
+
 def _load_env(
     *,
     environment_names: list[str],
@@ -248,11 +257,16 @@ def _load_env(
         "disable_hand_collisions": False,
         "reduced_action_space": bool(reduced_action_space),
     }
+    hand_anchor_y_offset = None
     if extra_task_kwargs:
         for key, value in extra_task_kwargs.items():
             if value is None:
                 continue
+            if key == HAND_ANCHOR_Y_OFFSET_TASK_KEY:
+                hand_anchor_y_offset = float(value)
+                continue
             base_task_kwargs[key] = value
+    hand_anchor_info = _apply_hand_anchor_y_offset(hand_anchor_y_offset)
 
     suite_kwargs: dict[str, Any] = {}
     if suite_load_kwargs:
@@ -283,6 +297,7 @@ def _load_env(
             load_info = {
                 "task_kwargs": dict(base_task_kwargs),
                 "suite_load_kwargs": suite_kwargs_record,
+                "hand_anchor_patch": hand_anchor_info,
                 "used_canonical_midi": bool(used_canonical),
             }
             return env_name, env, load_info
@@ -372,24 +387,6 @@ def _set_reduced_hand_qpos(task: Any, physics: Any, hand_qpos: np.ndarray) -> in
     return len(joints)
 
 
-def _set_piano_qpos_from_state(piano: Any, physics: Any, piano_state: np.ndarray, threshold: float) -> np.ndarray:
-    state = np.asarray(piano_state, dtype=np.float32).reshape(-1)
-    key_active = state[:88] > float(threshold)
-    qpos_range = np.asarray(getattr(piano, "_qpos_range"), dtype=np.float64)
-    inactive = np.maximum(qpos_range[:, 0], 0.0)
-    active = qpos_range[:, 1]
-    physics.bind(piano.joints).qpos = np.where(key_active, active, inactive)
-    if state.size > 88:
-        getattr(piano, "_sustain_state")[0] = float(state[88])
-    else:
-        getattr(piano, "_sustain_state")[0] = 0.0
-    if hasattr(physics, "forward"):
-        physics.forward()
-    piano._update_key_state(physics)
-    piano._update_key_color(physics)
-    return np.asarray(piano.activation, dtype=np.float32).reshape(-1)[:88]
-
-
 def _hand_joint_handles(task: Any) -> list[Any]:
     joints: list[Any] = []
     for hand_name in ("right_hand", "left_hand"):
@@ -442,9 +439,8 @@ def _restore_initial_rp1m_state(
 ) -> dict[str, Any]:
     """Copy the RP1M dataset's t=0 physics state into the simulator after env.reset().
 
-    Restores hand joint qpos, optionally piano key qpos / sustain pedal, and zeros velocities so
-    open-loop replay starts from the same configuration RP1M did at collection time. Required
-    before stepping recorded RP1M actions if you want them to track recorded states.
+    Restores hand joint qpos and zeros hand velocities. Dataset piano key states are deliberately
+    ignored so rollout piano activations only come from simulated hand actuation.
     """
     info: dict[str, Any] = {
         "hand_joints_restored": 0,
@@ -456,10 +452,10 @@ def _restore_initial_rp1m_state(
     if hand_joints_t0 is not None:
         info["hand_joints_restored"] = _set_reduced_hand_qpos(task, physics, hand_joints_t0)
     if piano_state_t0 is not None:
-        _set_piano_qpos_from_state(piano, physics, piano_state_t0, key_threshold)
-        info["piano_state_restored"] = True
+        info["piano_state_restore_skipped"] = True
+        info["piano_state_policy"] = "not_restored_or_used_by_simulator"
         if np.asarray(piano_state_t0).reshape(-1).size > 88:
-            info["sustain_restored"] = True
+            info["sustain_restore_skipped"] = True
     elif sustain_t0 is not None:
         try:
             getattr(piano, "_sustain_state")[0] = float(sustain_t0)
@@ -468,10 +464,6 @@ def _restore_initial_rp1m_state(
             info["sustain_warning"] = str(exc)
     if zero_velocities:
         joints = _hand_joint_handles(task)
-        try:
-            joints.extend(list(piano.joints))
-        except Exception:
-            pass
         warning = _zero_joint_velocities(physics, joints)
         if warning is None:
             info["qvel_zeroed"] = True
@@ -553,10 +545,86 @@ def piano_roll_to_midi_events(piano_roll: np.ndarray, *, dt: float, threshold: f
     return events
 
 
+def _rp1m_simulator_config_from_legacy_kwargs(
+    *,
+    mode: str,
+    dataset_timestep: float,
+    simulation_timestep: float,
+    fps: int,
+    width: int,
+    height: int,
+    max_source_steps: int | None,
+    render_every_source_step: int,
+    seed: int,
+    threshold: float,
+    reduced_action_space: bool,
+    action_source_scale: str,
+    action_mapping: str,
+    set_hand_qvel: bool,
+    extra_task_kwargs: dict[str, Any] | None,
+    hand_state_action_source: str = "recorded",
+) -> RolloutConfig:
+    task_kwargs = extra_task_kwargs or {}
+    raw_anchor_offset = task_kwargs.get(HAND_ANCHOR_Y_OFFSET_TASK_KEY, DEFAULT_HAND_ANCHOR_Y_OFFSET)
+    return RolloutConfig(
+        mode="action" if mode == "action" else "hand_state",
+        dataset_timestep=float(dataset_timestep),
+        simulation_timestep=float(simulation_timestep),
+        hand_anchor_y_offset=None if raw_anchor_offset is None else float(raw_anchor_offset),
+        auto_hand_anchor_y_offset=False,
+        reduced_action_space=bool(reduced_action_space),
+        action_source_scale=action_source_scale,  # type: ignore[arg-type]
+        action_mapping=action_mapping,  # type: ignore[arg-type]
+        hand_state_action_source=hand_state_action_source,  # type: ignore[arg-type]
+        restore_initial_hand=True,
+        set_hand_qvel=bool(set_hand_qvel),
+        gravity_compensation=bool(task_kwargs.get("gravity_compensation", False)),
+        primitive_fingertip_collisions=bool(task_kwargs.get("primitive_fingertip_collisions", False)),
+        disable_hand_collisions=bool(task_kwargs.get("disable_hand_collisions", False)),
+        seed=int(seed),
+        threshold=float(threshold),
+        max_source_steps=max_source_steps,
+        render_mp4=True,
+        render_audio=True,
+        render_every_source_step=max(int(render_every_source_step), 1),
+        width=int(width),
+        height=int(height),
+        fps=int(fps),
+    )
+
+
+def _partita_compat_from_rp1m_summary(
+    summary: dict[str, Any],
+    *,
+    label: str,
+    song_name: str,
+    output_dir: str | Path,
+    requested_playback_mode: str,
+    reference_piano_states: np.ndarray | None,
+) -> dict[str, Any]:
+    ref = summary.get("against_reference_piano_states")
+    hand_l2 = summary.get("hand_qpos_l2_vs_reference") or {}
+    result = {
+        **summary,
+        "label": label,
+        "song_name": song_name,
+        "playback_mode": f"rp1m_simulator_{summary.get('mode')}",
+        "requested_playback_mode": requested_playback_mode,
+        "piano_state_policy": "not_restored_or_used_by_simulator",
+        "reference_piano_state_policy": "scoring_only" if reference_piano_states is not None else "not_loaded",
+        "against_rp1m_piano_states": ref,
+        "video_format": "mp4" if summary.get("video_path") else None,
+        "hand_qpos_l2_mean": hand_l2.get("mean"),
+        "hand_qpos_l2_max": hand_l2.get("max"),
+    }
+    save_json(Path(output_dir) / f"{label}_playback.json", result)
+    return result
+
+
 def rollout_recorded_rp1m_episode_with_robopianist(
     *,
     hand_joints: np.ndarray,
-    piano_states: np.ndarray,
+    piano_states: np.ndarray | None,
     goals: np.ndarray,
     song_name: str,
     output_dir: str | Path,
@@ -570,106 +638,173 @@ def rollout_recorded_rp1m_episode_with_robopianist(
     seed: int = 0,
     threshold: float = 0.5,
 ) -> dict[str, Any]:
-    """Render RP1M recorded hand/key states directly in RoboPianist.
-
-    This validates dataset playback independently from open-loop action replay. Audio is
-    generated only from transitions in recorded RP1M piano key states.
-    """
-    os.environ.setdefault("MUJOCO_GL", "egl")
-    output_dir = ensure_dir(output_dir)
+    """Replay recorded RP1M hand states without restoring piano key states."""
     hand_joints = np.asarray(hand_joints, dtype=np.float32)
-    piano_states = np.asarray(piano_states, dtype=np.float32)
+    piano_ref = None if piano_states is None else np.asarray(piano_states, dtype=np.float32)
     goals = np.asarray(goals, dtype=np.float32)
-    if hand_joints.ndim != 2:
-        raise ValueError(f"Expected hand_joints [T, joints], got {hand_joints.shape}")
-    if piano_states.ndim != 2:
-        raise ValueError(f"Expected piano_states [T, keys], got {piano_states.shape}")
-    steps = min(int(hand_joints.shape[0]), int(piano_states.shape[0]), int(goals.shape[0]))
-    if max_steps is not None:
-        steps = min(steps, int(max_steps))
-
-    midi_proto_path = write_goals_proto(
-        goals,
-        output_dir / f"{label}_target_goals.proto",
-        dt=control_timestep,
-        title=f"Partita {label} {song_name}",
+    zero_actions = np.zeros((min(hand_joints.shape[0], goals.shape[0]), 39), dtype=np.float32)
+    trajectory = make_rp1m_trajectory_from_arrays(
+        song_key=song_name,
+        demo_id=0,
+        actions=zero_actions,
+        goals=goals,
+        hand_joints=hand_joints,
+        reference_piano_states=piano_ref,
+        environment_name=song_name,
     )
-    env_name, env, _load_info = _load_env(
-        environment_names=candidate_environment_names(song_name),
-        midi_proto_path=midi_proto_path,
-        control_timestep=control_timestep,
+    config = _rp1m_simulator_config_from_legacy_kwargs(
+        mode="hand_state",
+        dataset_timestep=control_timestep,
+        simulation_timestep=control_timestep,
+        fps=fps,
+        width=width,
+        height=height,
+        max_source_steps=max_steps,
+        render_every_source_step=render_every,
         seed=seed,
+        threshold=threshold,
         reduced_action_space=True,
+        action_source_scale="normalized_minus_one_to_one",
+        action_mapping="as_is",
+        set_hand_qvel=False,
+        extra_task_kwargs=None,
+        hand_state_action_source="zero",
     )
-    frames: list[np.ndarray] = []
-    played_roll: list[np.ndarray] = []
-    render_error = None
-    restored_hand_joint_count = 0
-    try:
-        env.reset()
-        task, physics, piano = _locate_task_physics_piano(env)
-        for step_index in range(steps):
-            restored_hand_joint_count = _set_reduced_hand_qpos(task, physics, hand_joints[step_index])
-            activation = _set_piano_qpos_from_state(piano, physics, piano_states[step_index], threshold)
-            played_roll.append(activation)
-            if step_index % max(int(render_every), 1) == 0 and render_error is None:
-                try:
-                    frames.append(render_frame(env, height=height, width=width))
-                except Exception as exc:
-                    render_error = str(exc)
-        video_path = None
-        video_format = None
-        audio_warning = None
-        audio_events = piano_roll_to_midi_events(piano_states[:steps], dt=control_timestep, threshold=threshold)
-        if render_error is None:
-            video_path, video_format, audio_warning = write_video(
-                frames,
-                output_dir / f"{label}_playback.mp4",
-                fps=max(int(fps / max(render_every, 1)), 1),
-                audio_events=audio_events,
-            )
-        played = np.stack(played_roll, axis=0) if played_roll else np.zeros((0, 88), dtype=np.float32)
-        goal_steps = min(int(goals.shape[0]), int(played.shape[0]))
-        goal_keys = min(int(goals.shape[-1]), int(played.shape[-1]), 88)
-        state_steps = min(int(piano_states.shape[0]), int(played.shape[0]))
-        state_keys = min(int(piano_states.shape[-1]), int(played.shape[-1]), 88)
-        against_goals = key_metrics(goals[:goal_steps, :goal_keys], played[:goal_steps, :goal_keys], threshold=threshold)
-        against_states = key_metrics(piano_states[:state_steps, :state_keys], played[:state_steps, :state_keys], threshold=threshold)
-        result = {
-            "label": label,
-            "song_name": song_name,
-            "environment_name": env_name,
-            "playback_mode": "recorded_rp1m_hand_joints_and_piano_states",
-            "audio_source": "recorded_rp1m_piano_state_key_transitions",
-            "midi_proto_path": str(midi_proto_path),
-            "hand_joints_shape": list(hand_joints.shape),
-            "piano_states_shape": list(piano_states.shape),
-            "steps_rendered": int(steps),
-            "restored_hand_joint_count": int(restored_hand_joint_count),
-            "rendered_frames": int(len(frames)),
-            "render_every": int(render_every),
-            "render_error": render_error,
-            "video_path": str(video_path) if video_path is not None else None,
-            "video_format": video_format,
-            "audio_warning": audio_warning,
-            "audio_midi_note_event_count": int(len(_note_midi_events(audio_events))),
-            "against_goals": {
-                **against_goals,
-                "scored_steps": int(goal_steps),
-                "scored_keys": int(goal_keys),
-            },
-            "against_rp1m_piano_states": {
-                **against_states,
-                "scored_steps": int(state_steps),
-                "scored_keys": int(state_keys),
-            },
+    summary = simulate_rp1m_rollout(trajectory, config, output_dir)
+    return _partita_compat_from_rp1m_summary(
+        summary,
+        label=label,
+        song_name=song_name,
+        output_dir=output_dir,
+        requested_playback_mode="recorded_rp1m_hand_states_zero_action",
+        reference_piano_states=piano_ref,
+    )
+
+
+def _set_reduced_hand_qvel(task: Any, physics: Any, hand_qvel: np.ndarray) -> int:
+    values = np.asarray(hand_qvel, dtype=np.float32).reshape(-1)
+    joints = _hand_joint_handles(task)
+    width = min(values.size, len(joints))
+    failed = 0
+    for joint, value in zip(joints[:width], values[:width]):
+        try:
+            physics.bind(joint).qvel = float(value)
+        except Exception:
+            failed += 1
+    return int(width - failed)
+
+
+def _source_rate_playback_score(
+    *,
+    source_played: np.ndarray,
+    source_hand: np.ndarray,
+    ref_piano: np.ndarray | None,
+    ref_hand: np.ndarray | None,
+    goals: np.ndarray | None,
+    threshold: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"source_scored_steps": int(source_played.shape[0])}
+    if source_played.size and goals is not None and goals.size:
+        steps = min(int(source_played.shape[0]), int(goals.shape[0]))
+        keys = min(int(source_played.shape[-1]), int(goals.shape[-1]), 88)
+        result["against_goals"] = {
+            **key_metrics(goals[:steps, :keys], source_played[:steps, :keys], threshold=threshold),
+            "scored_steps": int(steps),
+            "scored_keys": int(keys),
         }
-        save_json(output_dir / f"{label}_playback.json", result)
-        return result
-    finally:
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
+    if source_played.size and ref_piano is not None and ref_piano.size:
+        steps = min(int(source_played.shape[0]), int(ref_piano.shape[0]))
+        keys = min(int(source_played.shape[-1]), int(ref_piano.shape[-1]), 88)
+        result["against_rp1m_piano_states"] = {
+            **key_metrics(ref_piano[:steps, :keys], source_played[:steps, :keys], threshold=threshold),
+            "scored_steps": int(steps),
+            "scored_keys": int(keys),
+        }
+        played = source_played[:steps, :keys] > float(threshold)
+        ref = ref_piano[:steps, :keys] > float(threshold)
+        ious = []
+        for played_frame, ref_frame in zip(played, ref):
+            union = np.logical_or(played_frame, ref_frame).sum()
+            ious.append(float(np.logical_and(played_frame, ref_frame).sum() / max(int(union), 1)))
+        result["piano_state_iou_mean"] = float(np.mean(ious)) if ious else None
+    if source_hand.size and ref_hand is not None and ref_hand.size:
+        steps = min(int(source_hand.shape[0]), int(ref_hand.shape[0]))
+        diff = source_hand[:steps] - ref_hand[:steps]
+        l2 = np.linalg.norm(diff, axis=1)
+        result["hand_qpos_l2_mean"] = float(l2.mean()) if l2.size else None
+        result["hand_qpos_l2_max"] = float(l2.max()) if l2.size else None
+    return result
+
+
+def rollout_interpolated_rp1m_episode_with_robopianist(
+    *,
+    hand_joints: np.ndarray,
+    actions: np.ndarray,
+    goals: np.ndarray,
+    song_name: str,
+    output_dir: str | Path,
+    piano_states: np.ndarray | None = None,
+    label: str = "rp1m_interpolated_state",
+    dataset_timestep: float = 0.05,
+    simulation_timestep: float = 0.005,
+    fps: int = 20,
+    width: int = 640,
+    height: int = 480,
+    max_source_steps: int | None = None,
+    render_every_source_step: int = 1,
+    seed: int = 0,
+    threshold: float = 0.5,
+    reduced_action_space: bool = True,
+    action_source_scale: str = "normalized_minus_one_to_one",
+    action_mapping: str = "as_is",
+    restore_initial_piano: bool = True,
+    set_hand_qvel: bool = True,
+    extra_task_kwargs: dict[str, Any] | None = None,
+    suite_load_kwargs: dict[str, Any] | None = None,
+    prefer_canonical_midi: bool = False,
+    playback_mode: str = "recorded_state",
+) -> dict[str, Any]:
+    """Replay RP1M by interpolating hand states; piano states are scoring references only."""
+    if playback_mode not in {"recorded_state", "physical_action", "hand_state", "action"}:
+        raise ValueError("playback_mode must be 'hand_state', 'action', 'recorded_state', or 'physical_action'")
+    simulator_mode = "action" if playback_mode == "action" else "hand_state"
+    ref_piano = None if piano_states is None else np.asarray(piano_states, dtype=np.float32)
+    trajectory = make_rp1m_trajectory_from_arrays(
+        song_key=song_name,
+        demo_id=0,
+        actions=np.asarray(actions, dtype=np.float32),
+        goals=np.asarray(goals, dtype=np.float32),
+        hand_joints=np.asarray(hand_joints, dtype=np.float32),
+        reference_piano_states=ref_piano,
+        environment_name=song_name,
+    )
+    config = _rp1m_simulator_config_from_legacy_kwargs(
+        mode=simulator_mode,
+        dataset_timestep=dataset_timestep,
+        simulation_timestep=simulation_timestep,
+        fps=fps,
+        width=width,
+        height=height,
+        max_source_steps=max_source_steps,
+        render_every_source_step=render_every_source_step,
+        seed=seed,
+        threshold=threshold,
+        reduced_action_space=reduced_action_space,
+        action_source_scale=action_source_scale,
+        action_mapping=action_mapping,
+        set_hand_qvel=set_hand_qvel,
+        extra_task_kwargs=extra_task_kwargs,
+        hand_state_action_source="recorded",
+    )
+    summary = simulate_rp1m_rollout(trajectory, config, output_dir)
+    return _partita_compat_from_rp1m_summary(
+        summary,
+        label=label,
+        song_name=song_name,
+        output_dir=output_dir,
+        requested_playback_mode=playback_mode,
+        reference_piano_states=ref_piano,
+    )
 
 
 def _default_soundfont_path() -> Path | None:
@@ -911,7 +1046,7 @@ def diagnose_rp1m_one_step_consistency(
     *,
     actions: np.ndarray,
     hand_joints: np.ndarray,
-    piano_states: np.ndarray,
+    piano_states: np.ndarray | None,
     goals: np.ndarray,
     song_name: str,
     output_dir: str | Path,
@@ -933,7 +1068,7 @@ def diagnose_rp1m_one_step_consistency(
     For each timestep ``t`` in ``[start_t, min(T - 2, start_t + max_pairs - 1)]``:
 
     1. ``env.reset()``.
-    2. Restore RP1M ``hand_joints[t]`` and ``piano_states[t]`` (plus zero velocities).
+    2. Restore RP1M ``hand_joints[t]`` only (plus hand velocities).
     3. Apply ``actions[t]`` once via ``_prepare_control`` / ``env.step``.
     4. Compare simulator ``hand_qpos`` to RP1M ``hand_joints[t + 1]`` and piano activation to
        ``piano_states[t + 1]`` (first 88 keys, thresholded F1).
@@ -942,14 +1077,15 @@ def diagnose_rp1m_one_step_consistency(
     ``(state_t, action_t) -> state_{t+1}``. If your RP1M export aligns differently,
     compare aggregates across offsets externally.
 
-    Writes ``rp1m_one_step_consistency.csv`` and ``rp1m_one_step_consistency_summary.json``
+    ``piano_states`` may be supplied for scoring the next simulated activation, but it is not
+    restored into the simulator. Writes ``rp1m_one_step_consistency.csv`` and ``rp1m_one_step_consistency_summary.json``
     under ``output_dir``.
     """
     os.environ.setdefault("MUJOCO_GL", "egl")
     output_dir = ensure_dir(Path(output_dir))
     actions = np.asarray(actions, dtype=np.float32)
     hand_joints = np.asarray(hand_joints, dtype=np.float32)
-    piano_states = np.asarray(piano_states, dtype=np.float32)
+    ref_piano = None if piano_states is None else np.asarray(piano_states, dtype=np.float32)
     goals = np.asarray(goals, dtype=np.float32)
     if action_mapping not in ACTION_MAPPINGS:
         raise ValueError(f"Unknown action_mapping '{action_mapping}'")
@@ -959,9 +1095,10 @@ def diagnose_rp1m_one_step_consistency(
     length = min(
         int(actions.shape[0]),
         int(hand_joints.shape[0]),
-        int(piano_states.shape[0]),
         int(goals.shape[0]),
     )
+    if ref_piano is not None:
+        length = min(length, int(ref_piano.shape[0]))
     if length < 2:
         raise ValueError(f"Need at least two timesteps for one-step diagnosis; got length={length}")
     end_t = length - 1
@@ -992,7 +1129,7 @@ def diagnose_rp1m_one_step_consistency(
             _restore_initial_rp1m_state(
                 env,
                 hand_joints_t0=hand_joints[t],
-                piano_state_t0=piano_states[t],
+                piano_state_t0=None,
                 key_threshold=key_threshold,
                 zero_velocities=True,
             )
@@ -1014,12 +1151,12 @@ def diagnose_rp1m_one_step_consistency(
             ref_hand_next = hand_joints[t + 1]
             hand_l2 = _hand_qpos_l2(sim_hand, ref_hand_next)
             sim_activation = _capture_piano_activation(env)
-            ref_next = piano_states[t + 1]
             piano_km = {"key_f1": float("nan"), "key_precision": float("nan"), "key_recall": float("nan")}
             piano_iou: float | None = None
             sim_keys: list[int] = []
             ref_keys: list[int] = []
-            if sim_activation is not None and ref_next.size >= 88:
+            if sim_activation is not None and ref_piano is not None and ref_piano[t + 1].size >= 88:
+                ref_next = ref_piano[t + 1]
                 ref88 = np.asarray(ref_next[:88], dtype=np.float32).reshape(1, -1)
                 sim88 = np.asarray(sim_activation[:88], dtype=np.float32).reshape(1, -1)
                 piano_km = key_metrics(ref88, sim88, threshold=key_threshold)
@@ -1192,9 +1329,7 @@ def calibrate_action_scale(
                 _restore_initial_rp1m_state(
                     env,
                     hand_joints_t0=reference_hand_joints[0],
-                    piano_state_t0=reference_piano_states[0]
-                    if reference_piano_states is not None and reference_piano_states.shape[0] > 0
-                    else None,
+                    piano_state_t0=None,
                     key_threshold=key_threshold,
                     zero_velocities=True,
                 )
@@ -1343,7 +1478,7 @@ def rollout_reconstructed_actions_with_robopianist(
             restore_info = _restore_initial_rp1m_state(
                 env,
                 hand_joints_t0=ref_hand[0],
-                piano_state_t0=ref_piano[0] if ref_piano is not None and ref_piano.shape[0] > 0 else None,
+                piano_state_t0=None,
                 key_threshold=key_threshold,
                 zero_velocities=True,
             )
