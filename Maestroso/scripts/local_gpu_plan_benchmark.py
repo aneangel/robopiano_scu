@@ -164,6 +164,84 @@ def transform_for_rhapsody(targets: np.ndarray, masks: np.ndarray) -> tuple[np.n
     return transformed, transformed_mask
 
 
+def solve_rhapsody_batch_compat(
+    solver: Any,
+    target_fingertips: np.ndarray,
+    *,
+    active_mask: np.ndarray,
+    previous_qpos: np.ndarray,
+    refinement_steps: int = 0,
+    refinement_lr: float = 0.05,
+) -> Any:
+    if hasattr(solver, "solve_batch"):
+        return solver.solve_batch(
+            target_fingertips,
+            active_mask=active_mask,
+            previous_qpos=previous_qpos,
+            refinement_steps=int(refinement_steps),
+            refinement_lr=float(refinement_lr),
+        )
+
+    from types import SimpleNamespace
+
+    import torch
+
+    from rhapsody.constants import FINGERTIP_COORD_DIM
+    from rhapsody.reward import active_max_error, active_mean_error
+
+    target = np.asarray(target_fingertips, dtype=np.float32)
+    if target.ndim == 2 and target.shape[1] == NUM_FINGERS * FINGERTIP_COORD_DIM:
+        target = target.reshape(target.shape[0], NUM_FINGERS, FINGERTIP_COORD_DIM)
+    if target.ndim == 2 and target.shape == (NUM_FINGERS, FINGERTIP_COORD_DIM):
+        target = target[None, ...]
+    if target.ndim != 3 or target.shape[1:] != (NUM_FINGERS, FINGERTIP_COORD_DIM):
+        raise ValueError(f"target_fingertips must have shape [N, 10, 3], got {target.shape}")
+    count = int(target.shape[0])
+    mask = np.asarray(active_mask, dtype=np.float32)
+    if mask.ndim == 1:
+        mask = np.repeat(mask.reshape(1, -1), count, axis=0)
+    if mask.shape != (count, NUM_FINGERS):
+        raise ValueError(f"active_mask must have shape [{count}, 10], got {mask.shape}")
+    previous = np.asarray(previous_qpos, dtype=np.float32)
+    if previous.ndim == 1:
+        previous = np.repeat(previous.reshape(1, -1), count, axis=0)
+    if previous.shape != (count, HAND_STATE_DIM):
+        raise ValueError(f"previous_qpos must have shape [{count}, {HAND_STATE_DIM}], got {previous.shape}")
+
+    fill = solver.normalizer.fingertip_mean.detach().cpu().numpy().reshape(NUM_FINGERS, FINGERTIP_COORD_DIM)
+    target_filled = np.where(np.isfinite(target), target, fill[None, ...]).astype(np.float32)
+    target_t = torch.from_numpy(target_filled).to(solver.device)
+    mask_t = torch.from_numpy(mask).to(solver.device)
+    previous_t = torch.from_numpy(previous).to(solver.device)
+    target_norm = solver.normalizer.normalize_fingertips(target_t).reshape(target_t.shape)
+    previous_norm = solver.normalizer.normalize_qpos(previous_t)
+
+    with torch.no_grad():
+        qpos_norm = solver.policy(target_norm, mask_t, previous_norm)
+    if int(refinement_steps) > 0:
+        qpos_norm = solver._refine(
+            qpos_norm,
+            target_t,
+            mask_t,
+            anchor_qpos_norm=qpos_norm.detach(),
+            steps=int(refinement_steps),
+            lr=float(refinement_lr),
+        )
+    with torch.no_grad():
+        predicted_tips = solver.normalizer.denormalize_fingertips(solver.fk_model(qpos_norm))
+        qpos = solver.normalizer.denormalize_qpos(qpos_norm)
+        mean_error = active_mean_error(predicted_tips, target_t, mask_t)
+        max_error = active_max_error(predicted_tips, target_t, mask_t)
+    return SimpleNamespace(
+        qpos=qpos.detach().cpu().numpy().astype(np.float32, copy=False),
+        predicted_fingertips=predicted_tips.detach().cpu().numpy().astype(np.float32, copy=False),
+        active_mask=mask.astype(np.float32, copy=False),
+        mean_error_m=mean_error.detach().cpu().numpy().astype(np.float32, copy=False),
+        max_error_m=max_error.detach().cpu().numpy().astype(np.float32, copy=False),
+        refinement_steps=int(refinement_steps),
+    )
+
+
 def solve_proposals(
     solver: RhapsodyIKSolver,
     targets: np.ndarray,
@@ -192,7 +270,8 @@ def solve_proposals(
         max_rows: list[np.ndarray] = []
         for start in range(0, count, max(int(batch_size), 1)):
             end = min(start + max(int(batch_size), 1), count)
-            solution = solver.solve_batch(
+            solution = solve_rhapsody_batch_compat(
+                solver,
                 proposal_targets[start:end],
                 active_mask=proposal_masks[start:end],
                 previous_qpos=previous[start:end],

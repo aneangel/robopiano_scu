@@ -41,5 +41,5 @@ python Maestroso/scripts/run_acceleration_sweep.py \
   --proposal-passes 2 \
   --proposal-refinement-steps 0 \
   --chunk-seconds 15 \
-  --chunk-overlap-seconds 0 \
+  --chunk-overlap-seconds 1.0 \
   --chunk-workers 2

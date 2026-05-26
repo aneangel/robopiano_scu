@@ -47,6 +47,56 @@ The initial Slurm job is intentionally a short sweep. GPU nodes can have queue
 waits, so the sweep runs several variants in one allocation and writes timing,
 trajectory, and rollout metrics into one output tree.
 
+## Accuracy Recovery Sweep
+
+Speed is secondary in recovery mode. The recovery sweep disables successive
+halving, runs short 15-30 second windows, validates every active waypoint with
+CPU MuJoCo activation, and runs the full RP1M retest for every variant.
+
+```bash
+sbatch Maestroso/slurm/run_accuracy_recovery_sweep.slurm
+```
+
+Recovery variants:
+
+- `impromptu_accuracy_baseline`
+- `maestroso_bagatelle_assign_cpu_verify`
+- `maestroso_bagatelle_assign_gpu_seed_cpu_verify`
+- `maestroso_bagatelle_assign_gpu_seed_multistart`
+- `maestroso_bagatelle_assign_gpu_seed_topk`
+- `maestroso_hard_window_dense_repair`
+
+The baseline calls `Impromptu/scripts/plan_trajectory.py` with
+`joint_space_straighten`, Bagatelle legacy previous-pose assignment,
+`key_press_depth=0.006`, `wrong_hand_penalty=4.0`, split key 48, dynamic hand
+split, `avoid_mispresses`, `anchor_stride=2`, `ik_max_nfev=80`, and static
+contact validation. It does not use Rhapsody or chunking.
+
+Rhapsody recovery variants use the GPU only as a seed proposal. Final waypoint
+poses must come from exact CPU MuJoCo IK and all-waypoint activation
+validation; raw GPU proposals are never accepted directly.
+
+Recovery outputs include:
+
+- `all_waypoint_activation_summary.json`
+- `all_waypoint_activation/per_waypoint_activation.json`
+- `variant_result.json`
+- `rp1m_retest/<run_id>/impromptu_rp1m_retest_result.json`
+- `offline_training_failures.jsonl`
+
+Required recovery metadata fields are written into each `variant_result.json`:
+`dropped_key_count`, `all_waypoint_activation_f1`,
+`all_waypoint_activation_tp`, `all_waypoint_activation_fp`,
+`all_waypoint_activation_fn`, `repair_tier_counts`,
+`accepted_raw_gpu_proposals`, `accepted_cpu_verified_waypoints`,
+`failed_waypoints`, `chunk_overlap_seconds`, and `stitch_blend_enabled`.
+
+`build_bagatelle_waypoint_targets()` in
+`Maestroso/scripts/run_accuracy_recovery_sweep.py` is the production proposal
+target builder. It runs Bagatelle's previous-pose assignment sequentially and
+hard-fails if any key is dropped. The older split-even target builder remains
+only as a debugging path in the fast proposal scripts.
+
 The sweep uses staged successive halving:
 
 1. Stage A runs planning only on a short cheap proxy window with a large anchor
@@ -100,10 +150,11 @@ For full MAESTRO generation, use the chunked Rhapsody path after validating it
 on short windows. The intended production shape is:
 
 1. Convert the full MIDI to `target_keys`.
-2. Split into phrase or fixed-length chunks.
+2. Split into phrase or fixed-length chunks with at least 1.0 second overlap.
 3. Plan chunks independently with GPU Rhapsody IK using
    `joint_space_straighten`.
-4. Stitch chunk trajectories with overlap smoothing.
+4. Stitch chunk trajectories with smoothstep overlap blending, deduplicate
+   overlap waypoints, and recompute velocities after stitching.
 5. Run CPU-parallel MuJoCo rollout scoring.
 6. Repair only chunks below the target F1 threshold.
 

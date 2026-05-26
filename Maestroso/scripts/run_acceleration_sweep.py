@@ -161,6 +161,96 @@ def build_proposal_fingertip_targets(
     }
 
 
+def build_bagatelle_waypoint_targets(
+    *,
+    kin: Any,
+    waypoint_target_keys: np.ndarray,
+    key_targets: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    from dataclasses import replace
+
+    from bagatelle.assignment import assign_fingers_previous_pose
+    from bagatelle.config import BagatelleConfig
+
+    cfg = BagatelleConfig(
+        control_timestep=CONTROL_TIMESTEP,
+        threshold=0.5,
+        environment_name=ENV_NAME,
+        key_press_depth=0.006,
+        wrong_hand_penalty=4.0,
+        wrong_hand_split_key=48,
+        assignment_dynamic_hand_split=True,
+        assignment_dynamic_hand_split_min_span=12,
+        assignment_dynamic_hand_split_min_keys=3,
+        same_key_same_finger_bonus=0.25,
+        assignment_fail_if_unassigned=True,
+        ik_unassigned_fingertip_strategy="avoid_mispresses",
+        ik_unassigned_fingertip_avoidance_weight=0.5,
+        ik_unassigned_fingertip_avoidance_radius=0.03,
+        ik_max_nfev=80,
+        residual_success_threshold=0.02,
+        ik_static_contact_validation=True,
+    )
+    keysets = np.asarray(waypoint_target_keys, dtype=np.float32).reshape(-1, NUM_KEYS)
+    targets = np.full((keysets.shape[0], NUM_FINGERS, 3), np.nan, dtype=np.float32)
+    masks = np.zeros((keysets.shape[0], NUM_FINGERS), dtype=np.float32)
+    assignments = np.full((keysets.shape[0], NUM_FINGERS), -1, dtype=np.int32)
+    previous_qpos_seeds = np.zeros((keysets.shape[0], HAND_STATE_DIM), dtype=np.float32)
+    previous_qpos = np.asarray(kin.neutral_qpos, dtype=np.float32).copy()
+    neutral_qpos = np.asarray(kin.neutral_qpos, dtype=np.float32).copy()
+    previous_fingertips = np.asarray(kin.fingertip_positions_for_qpos(previous_qpos), dtype=np.float32)
+    previous_assignment = np.full((NUM_FINGERS,), -1, dtype=np.int32)
+    dropped_rows: list[dict[str, Any]] = []
+    nfev_sum = 0
+    max_residual = 0.0
+    success_count = 0
+    for index, keyset in enumerate(keysets):
+        active_keys = np.flatnonzero(keyset[:NUM_KEYS] > 0.5).astype(np.int32)
+        previous_qpos_seeds[index] = previous_qpos.astype(np.float32)
+        contact_targets = kin.key_contact_targets(active_keys)
+        assignment = assign_fingers_previous_pose(
+            active_keys,
+            previous_fingertips,
+            contact_targets,
+            cfg,
+            previous_assignment=previous_assignment,
+        )
+        if assignment.count:
+            assignment = replace(
+                assignment,
+                target_positions=key_targets[assignment.assigned_keys.astype(np.int64)].astype(np.float32),
+            )
+        dense = assignment.dense_key_by_finger()
+        assignments[index] = dense.astype(np.int32)
+        targets[index] = assignment.dense_targets_by_finger().astype(np.float32)
+        masks[index] = (dense >= 0).astype(np.float32)
+        if assignment.unassigned_keys.size:
+            dropped_rows.append(
+                {
+                    "waypoint_index": int(index),
+                    "unassigned_keys": assignment.unassigned_keys.astype(int).tolist(),
+                }
+            )
+        result = kin.solve_press_pose(assignment, previous_qpos, neutral_qpos=neutral_qpos, config=cfg)
+        previous_qpos = np.asarray(result.pose, dtype=np.float32)
+        previous_fingertips = np.asarray(result.fingertip_positions, dtype=np.float32)
+        previous_assignment = dense.astype(np.int32)
+        nfev_sum += int(result.nfev)
+        max_residual = max(max_residual, float(result.max_residual))
+        success_count += int(bool(result.success))
+    dropped_key_count = int(sum(len(row["unassigned_keys"]) for row in dropped_rows))
+    if dropped_key_count:
+        raise RuntimeError(f"Bagatelle waypoint assignment dropped target keys: {dropped_key_count}")
+    return targets, masks, assignments, previous_qpos_seeds, {
+        "assignment_strategy": "bagatelle_legacy_previous_pose_sequential",
+        "dropped_key_count": int(dropped_key_count),
+        "dropped_rows": dropped_rows,
+        "cpu_seed_success_count": int(success_count),
+        "cpu_seed_nfev_sum": int(nfev_sum),
+        "cpu_seed_max_residual_m": float(max_residual),
+    }
+
+
 def transform_bagatelle_targets_for_rhapsody(
     targets: np.ndarray,
     masks: np.ndarray,
@@ -177,11 +267,90 @@ def transform_bagatelle_targets_for_rhapsody(
     return transformed, transformed_mask
 
 
+def solve_rhapsody_batch_compat(
+    solver: Any,
+    target_fingertips: np.ndarray,
+    *,
+    active_mask: np.ndarray,
+    previous_qpos: np.ndarray,
+    refinement_steps: int = 0,
+    refinement_lr: float = 0.05,
+) -> Any:
+    if hasattr(solver, "solve_batch"):
+        return solver.solve_batch(
+            target_fingertips,
+            active_mask=active_mask,
+            previous_qpos=previous_qpos,
+            refinement_steps=int(refinement_steps),
+            refinement_lr=float(refinement_lr),
+        )
+
+    from types import SimpleNamespace
+
+    import torch
+
+    from rhapsody.constants import FINGERTIP_COORD_DIM
+    from rhapsody.reward import active_max_error, active_mean_error
+
+    target = np.asarray(target_fingertips, dtype=np.float32)
+    if target.ndim == 2 and target.shape[1] == NUM_FINGERS * FINGERTIP_COORD_DIM:
+        target = target.reshape(target.shape[0], NUM_FINGERS, FINGERTIP_COORD_DIM)
+    if target.ndim == 2 and target.shape == (NUM_FINGERS, FINGERTIP_COORD_DIM):
+        target = target[None, ...]
+    if target.ndim != 3 or target.shape[1:] != (NUM_FINGERS, FINGERTIP_COORD_DIM):
+        raise ValueError(f"target_fingertips must have shape [N, 10, 3], got {target.shape}")
+    count = int(target.shape[0])
+    mask = np.asarray(active_mask, dtype=np.float32)
+    if mask.ndim == 1:
+        mask = np.repeat(mask.reshape(1, -1), count, axis=0)
+    if mask.shape != (count, NUM_FINGERS):
+        raise ValueError(f"active_mask must have shape [{count}, 10], got {mask.shape}")
+    previous = np.asarray(previous_qpos, dtype=np.float32)
+    if previous.ndim == 1:
+        previous = np.repeat(previous.reshape(1, -1), count, axis=0)
+    if previous.shape != (count, HAND_STATE_DIM):
+        raise ValueError(f"previous_qpos must have shape [{count}, {HAND_STATE_DIM}], got {previous.shape}")
+
+    fill = solver.normalizer.fingertip_mean.detach().cpu().numpy().reshape(NUM_FINGERS, FINGERTIP_COORD_DIM)
+    target_filled = np.where(np.isfinite(target), target, fill[None, ...]).astype(np.float32)
+    target_t = torch.from_numpy(target_filled).to(solver.device)
+    mask_t = torch.from_numpy(mask).to(solver.device)
+    previous_t = torch.from_numpy(previous).to(solver.device)
+    target_norm = solver.normalizer.normalize_fingertips(target_t).reshape(target_t.shape)
+    previous_norm = solver.normalizer.normalize_qpos(previous_t)
+
+    with torch.no_grad():
+        qpos_norm = solver.policy(target_norm, mask_t, previous_norm)
+    if int(refinement_steps) > 0:
+        qpos_norm = solver._refine(
+            qpos_norm,
+            target_t,
+            mask_t,
+            anchor_qpos_norm=qpos_norm.detach(),
+            steps=int(refinement_steps),
+            lr=float(refinement_lr),
+        )
+    with torch.no_grad():
+        predicted_tips = solver.normalizer.denormalize_fingertips(solver.fk_model(qpos_norm))
+        qpos = solver.normalizer.denormalize_qpos(qpos_norm)
+        mean_error = active_mean_error(predicted_tips, target_t, mask_t)
+        max_error = active_max_error(predicted_tips, target_t, mask_t)
+    return SimpleNamespace(
+        qpos=qpos.detach().cpu().numpy().astype(np.float32, copy=False),
+        predicted_fingertips=predicted_tips.detach().cpu().numpy().astype(np.float32, copy=False),
+        active_mask=mask.astype(np.float32, copy=False),
+        mean_error_m=mean_error.detach().cpu().numpy().astype(np.float32, copy=False),
+        max_error_m=max_error.detach().cpu().numpy().astype(np.float32, copy=False),
+        refinement_steps=int(refinement_steps),
+    )
+
+
 def solve_gpu_proposal_batch(
     targets: np.ndarray,
     masks: np.ndarray,
     *,
     neutral_qpos: np.ndarray,
+    previous_qpos_seeds: np.ndarray | None = None,
     lower: np.ndarray,
     upper: np.ndarray,
     device: str,
@@ -208,7 +377,10 @@ def solve_gpu_proposal_batch(
     proposal_targets, proposal_masks = transform_bagatelle_targets_for_rhapsody(targets, masks)
     batch = max(int(batch_size), 1)
     pass_count = max(int(passes), 1)
-    previous = np.repeat(np.asarray(neutral_qpos, dtype=np.float32).reshape(1, -1), count, axis=0)
+    if previous_qpos_seeds is None:
+        previous = np.repeat(np.asarray(neutral_qpos, dtype=np.float32).reshape(1, -1), count, axis=0)
+    else:
+        previous = np.asarray(previous_qpos_seeds, dtype=np.float32).reshape(count, HAND_STATE_DIM)
     qpos = previous.copy()
     mean_error = np.zeros((count,), dtype=np.float32)
     max_error = np.zeros((count,), dtype=np.float32)
@@ -218,7 +390,8 @@ def solve_gpu_proposal_batch(
         max_rows: list[np.ndarray] = []
         for start in range(0, count, batch):
             end = min(start + batch, count)
-            solution = solver.solve_batch(
+            solution = solve_rhapsody_batch_compat(
+                solver,
                 proposal_targets[start:end],
                 active_mask=proposal_masks[start:end],
                 previous_qpos=previous[start:end],
@@ -232,8 +405,11 @@ def solve_gpu_proposal_batch(
         qpos = np.clip(qpos, np.asarray(lower, dtype=np.float32), np.asarray(upper, dtype=np.float32)).astype(np.float32)
         mean_error = np.concatenate(mean_rows, axis=0).astype(np.float32)
         max_error = np.concatenate(max_rows, axis=0).astype(np.float32)
-        previous = np.repeat(np.asarray(neutral_qpos, dtype=np.float32).reshape(1, -1), count, axis=0)
-        if count > 1:
+        if previous_qpos_seeds is not None:
+            previous = np.asarray(previous_qpos_seeds, dtype=np.float32).reshape(count, HAND_STATE_DIM)
+        else:
+            previous = np.repeat(np.asarray(neutral_qpos, dtype=np.float32).reshape(1, -1), count, axis=0)
+        if previous_qpos_seeds is None and count > 1:
             previous[1:] = qpos[:-1]
     return qpos, mean_error, max_error
 
@@ -1080,26 +1256,112 @@ def plan_chunk(
     return chunk_parent / chunk_name
 
 
-def stitch_chunks(chunk_dirs: list[Path], output_dir: Path) -> dict[str, Any]:
-    arrays: dict[str, list[np.ndarray]] = {}
+def _smoothstep(count: int) -> np.ndarray:
+    if int(count) <= 0:
+        return np.zeros((0, 1), dtype=np.float32)
+    x = np.linspace(0.0, 1.0, int(count), dtype=np.float32)
+    w = x * x * (3.0 - 2.0 * x)
+    return w.reshape(-1, 1).astype(np.float32)
+
+
+def _append_with_overlap_blend(
+    existing: np.ndarray | None,
+    incoming: np.ndarray,
+    *,
+    overlap: int,
+    blend: bool,
+) -> np.ndarray:
+    values = np.asarray(incoming)
+    if existing is None:
+        return values.copy()
+    if values.size == 0:
+        return existing
+    trim = min(max(int(overlap), 0), int(existing.shape[0]), int(values.shape[0]))
+    if trim <= 0:
+        return np.concatenate([existing, values], axis=0)
+    merged = existing.copy()
+    if bool(blend) and np.issubdtype(merged.dtype, np.floating):
+        weights = _smoothstep(trim).astype(merged.dtype, copy=False)
+        while weights.ndim < merged[-trim:].ndim:
+            weights = weights[..., None]
+        merged[-trim:] = (1.0 - weights) * merged[-trim:] + weights * values[:trim]
+    return np.concatenate([merged, values[trim:]], axis=0)
+
+
+def stitch_chunks(
+    chunk_dirs: list[Path],
+    output_dir: Path,
+    *,
+    chunk_overlap_steps: int,
+    stitch_blend_enabled: bool = True,
+) -> dict[str, Any]:
+    stitched: dict[str, np.ndarray | None] = {
+        "target_keys": None,
+        "planned_hand_joints": None,
+        "planned_hand_joints_dense": None,
+        "segment_ids": None,
+        "segment_ids_dense": None,
+    }
     offset = 0
     waypoint_frames: list[np.ndarray] = []
+    dense_substeps = 1
     for chunk_dir in chunk_dirs:
         with np.load(chunk_dir / "trajectory.npz", allow_pickle=False) as data:
-            for key in (
-                "target_keys",
-                "planned_hand_joints",
-                "planned_hand_velocities",
-                "planned_hand_joints_dense",
-                "planned_hand_velocities_dense",
-            ):
-                arrays.setdefault(key, []).append(np.asarray(data[key]))
+            target = np.asarray(data["target_keys"], dtype=np.float32)
+            hand = np.asarray(data["planned_hand_joints"], dtype=np.float32)
+            dense = np.asarray(data["planned_hand_joints_dense"], dtype=np.float32)
+            dense_substeps = max(int(round(float(dense.shape[0]) / float(max(target.shape[0], 1)))), 1)
+            overlap = min(max(int(chunk_overlap_steps), 0), int(target.shape[0]))
+            dense_overlap = min(overlap * dense_substeps, int(dense.shape[0]))
+            stitched["target_keys"] = _append_with_overlap_blend(
+                stitched["target_keys"],
+                target,
+                overlap=overlap,
+                blend=False,
+            )
+            stitched["planned_hand_joints"] = _append_with_overlap_blend(
+                stitched["planned_hand_joints"],
+                hand,
+                overlap=overlap,
+                blend=bool(stitch_blend_enabled),
+            )
+            stitched["planned_hand_joints_dense"] = _append_with_overlap_blend(
+                stitched["planned_hand_joints_dense"],
+                dense,
+                overlap=dense_overlap,
+                blend=bool(stitch_blend_enabled),
+            )
+            if "segment_ids" in data:
+                stitched["segment_ids"] = _append_with_overlap_blend(
+                    stitched["segment_ids"],
+                    np.asarray(data["segment_ids"], dtype=np.int32),
+                    overlap=overlap,
+                    blend=False,
+                )
+            if "segment_ids_dense" in data:
+                stitched["segment_ids_dense"] = _append_with_overlap_blend(
+                    stitched["segment_ids_dense"],
+                    np.asarray(data["segment_ids_dense"], dtype=np.int32),
+                    overlap=dense_overlap,
+                    blend=False,
+                )
             if "waypoint_frames" in data:
-                waypoint_frames.append(np.asarray(data["waypoint_frames"], dtype=np.int64) + offset)
-            offset += int(np.asarray(data["target_keys"]).shape[0])
-    payload = {key: np.concatenate(values, axis=0) for key, values in arrays.items()}
+                local = np.asarray(data["waypoint_frames"], dtype=np.int64)
+                if offset > 0 and chunk_overlap_steps > 0:
+                    local = local[local >= int(chunk_overlap_steps)] - int(chunk_overlap_steps)
+                waypoint_frames.append(local + offset)
+            offset = int(np.asarray(stitched["target_keys"]).shape[0]) if stitched["target_keys"] is not None else 0
+    payload = {key: np.asarray(value) for key, value in stitched.items() if value is not None}
+    payload["planned_hand_velocities"] = compute_hand_velocities(
+        np.asarray(payload["planned_hand_joints"], dtype=np.float32),
+        control_timestep=CONTROL_TIMESTEP,
+    )
+    payload["planned_hand_velocities_dense"] = compute_hand_velocities(
+        np.asarray(payload["planned_hand_joints_dense"], dtype=np.float32),
+        control_timestep=CONTROL_TIMESTEP / float(max(int(dense_substeps), 1)),
+    )
     if waypoint_frames:
-        payload["waypoint_frames"] = np.concatenate(waypoint_frames, axis=0)
+        payload["waypoint_frames"] = np.unique(np.concatenate(waypoint_frames, axis=0)).astype(np.int64)
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_save_npz(output_dir / "trajectory.npz", **payload)
     metadata = {
@@ -1107,6 +1369,9 @@ def stitch_chunks(chunk_dirs: list[Path], output_dir: Path) -> dict[str, Any]:
         "trajectory_mode": PRODUCTION_TRAJECTORY_MODE,
         "chunk_count": len(chunk_dirs),
         "chunk_dirs": [str(path) for path in chunk_dirs],
+        "chunk_overlap_steps": int(max(int(chunk_overlap_steps), 0)),
+        "chunk_overlap_seconds": float(max(int(chunk_overlap_steps), 0) * CONTROL_TIMESTEP),
+        "stitch_blend_enabled": bool(stitch_blend_enabled),
         "target_keys_shape": list(payload["target_keys"].shape),
         "num_dense_frames": int(payload["planned_hand_joints_dense"].shape[0]),
         "environment_name": ENV_NAME,
@@ -1148,10 +1413,11 @@ def run_chunked_variant(
         target_keys, midi_meta = load_target_keys_from_midi(
             song["midi_path"], control_timestep=0.05, max_duration_s=max_duration_s
         )
+        effective_overlap_seconds = max(float(chunk_overlap_seconds), 1.0)
         ranges = chunk_ranges(
             int(target_keys.shape[0]),
             max(int(round(float(chunk_seconds) / 0.05)), 1),
-            max(int(round(float(chunk_overlap_seconds) / 0.05)), 0),
+            max(int(round(effective_overlap_seconds / 0.05)), 1),
         )
         chunk_dirs: list[Path] = []
         if int(chunk_workers) <= 1:
@@ -1184,9 +1450,22 @@ def run_chunked_variant(
                 }
                 done = [(futures[future], future.result()) for future in as_completed(futures)]
                 chunk_dirs = [path for _, path in sorted(done)]
-        metadata = stitch_chunks(chunk_dirs, run_dir)
+        metadata = stitch_chunks(
+            chunk_dirs,
+            run_dir,
+            chunk_overlap_steps=max(int(round(effective_overlap_seconds / CONTROL_TIMESTEP)), 1),
+            stitch_blend_enabled=True,
+        )
         result.update(extract_metrics(run_dir))
-        result.update({"chunk_count": len(chunk_dirs), "midi_meta": midi_meta, "chunk_metadata": metadata})
+        result.update(
+            {
+                "chunk_count": len(chunk_dirs),
+                "midi_meta": midi_meta,
+                "chunk_metadata": metadata,
+                "chunk_overlap_seconds": float(effective_overlap_seconds),
+                "stitch_blend_enabled": True,
+            }
+        )
         result["plan_seconds"] = float(time.time() - started)
         attach_proxy(
             result,
@@ -1250,7 +1529,8 @@ def run_gpu_batch_proposal_variant(
     from impromptu.joint_space_trajectory import build_joint_space_straightened_trajectory
     from intermezzo.planner import compute_hand_velocities
 
-    use_bagatelle_assignment = variant == "gpu_batch_proposal_bagatelle_assign"
+    use_debug_split_even = variant == "gpu_batch_proposal_debug_split_even"
+    use_bagatelle_assignment = not bool(use_debug_split_even)
     run_id = str(song["run_id"])
     variant_root = output_root / variant
     run_dir = variant_root / run_id
@@ -1296,17 +1576,29 @@ def run_gpu_batch_proposal_variant(
             output_dir=run_dir / "bagatelle_targets",
         )
         key_targets = kin.key_press_targets(np.arange(NUM_KEYS, dtype=np.int32), press_depth=0.006)
-        fingertip_targets, active_masks, assignments, assignment_meta = build_proposal_fingertip_targets(
-            waypoint_target_keys,
-            key_targets,
-            threshold=0.5,
-            split_key=48,
-        )
+        previous_qpos_seeds = None
+        if bool(use_debug_split_even):
+            fingertip_targets, active_masks, assignments, assignment_meta = build_proposal_fingertip_targets(
+                waypoint_target_keys,
+                key_targets,
+                threshold=0.5,
+                split_key=48,
+            )
+            assignment_meta["debug_only"] = True
+        else:
+            fingertip_targets, active_masks, assignments, previous_qpos_seeds, assignment_meta = (
+                build_bagatelle_waypoint_targets(
+                    kin=kin,
+                    waypoint_target_keys=waypoint_target_keys,
+                    key_targets=key_targets,
+                )
+            )
         proposal_started = time.time()
         waypoint_qpos, proposal_mean_error, proposal_max_error = solve_gpu_proposal_batch(
             fingertip_targets,
             active_masks,
             neutral_qpos=np.asarray(kin.neutral_qpos, dtype=np.float32),
+            previous_qpos_seeds=previous_qpos_seeds,
             lower=np.asarray(kin.joint_lower, dtype=np.float32),
             upper=np.asarray(kin.joint_upper, dtype=np.float32),
             device=str(proposal_device),
@@ -1551,7 +1843,7 @@ def run_variant_once(
             evaluation_stage=evaluation_stage,
             render_mp4=bool(render_mp4),
         )
-    if variant in ("gpu_batch_proposal", "gpu_batch_proposal_bagatelle_assign"):
+    if variant in ("gpu_batch_proposal", "gpu_batch_proposal_bagatelle_assign", "gpu_batch_proposal_debug_split_even"):
         return run_gpu_batch_proposal_variant(
             variant=variant,
             song=song,
@@ -1820,7 +2112,7 @@ def main() -> None:
     parser.add_argument("--variant-timeout-s", type=int, default=900)
     parser.add_argument("--rollout-timeout-s", type=int, default=600)
     parser.add_argument("--chunk-seconds", type=float, default=15.0)
-    parser.add_argument("--chunk-overlap-seconds", type=float, default=0.0)
+    parser.add_argument("--chunk-overlap-seconds", type=float, default=1.0)
     parser.add_argument("--chunk-workers", type=int, default=1)
     parser.add_argument("--hard-window-max-duration-s", type=float, default=15.0)
     parser.add_argument("--proposal-device", default="cuda")
