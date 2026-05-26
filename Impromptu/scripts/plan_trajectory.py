@@ -158,6 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-static-contact-missed-key-weight", type=float, default=2.0)
     parser.add_argument("--ik-static-contact-residual-weight", type=float, default=10.0)
     parser.add_argument("--ik-static-contact-failure-weight", type=float, default=25.0)
+    parser.add_argument(
+        "--ik-cache-mode",
+        choices=("off", "exact_only", "exact_and_warm_start"),
+        default="off",
+        help="Per-song keyset fingerprint cache mode for IK short-circuiting.",
+    )
+    parser.add_argument("--ik-cache-jaccard-threshold", type=float, default=0.8)
     parser.add_argument("--enable-rhapsody-ik", action="store_true")
     parser.add_argument("--rhapsody-ik-checkpoint", default="")
     parser.add_argument("--rhapsody-ik-refinement-steps", type=int, default=0)
@@ -328,6 +335,8 @@ def main() -> None:
         ik_static_contact_missed_key_weight=float(args.ik_static_contact_missed_key_weight),
         ik_static_contact_residual_weight=float(args.ik_static_contact_residual_weight),
         ik_static_contact_failure_weight=float(args.ik_static_contact_failure_weight),
+        ik_cache_mode=str(args.ik_cache_mode),
+        ik_cache_jaccard_threshold=float(args.ik_cache_jaccard_threshold),
         rhapsody_ik_enabled=bool(args.enable_rhapsody_ik),
         rhapsody_ik_checkpoint=str(args.rhapsody_ik_checkpoint),
         rhapsody_ik_refinement_steps=int(args.rhapsody_ik_refinement_steps),

@@ -69,6 +69,8 @@ def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
         ik_static_contact_missed_key_weight=float(config.ik_static_contact_missed_key_weight),
         ik_static_contact_residual_weight=float(config.ik_static_contact_residual_weight),
         ik_static_contact_failure_weight=float(config.ik_static_contact_failure_weight),
+        ik_cache_mode=str(getattr(config, "ik_cache_mode", "off")),
+        ik_cache_jaccard_threshold=float(getattr(config, "ik_cache_jaccard_threshold", 0.8)),
         rhapsody_ik_enabled=bool(config.rhapsody_ik_enabled),
         rhapsody_ik_checkpoint=str(config.rhapsody_ik_checkpoint),
         rhapsody_ik_refinement_steps=int(config.rhapsody_ik_refinement_steps),
@@ -553,6 +555,8 @@ def plan_target_keys(
         metadata["bagatelle_planner"] = bagatelle_plan.metadata.get("planner", "bagatelle")
         metadata["bagatelle_assignment_mode"] = bagatelle_plan.metadata.get("assignment_mode")
         metadata["bagatelle_config"] = bagatelle_plan.metadata.get("config", bag_cfg.to_dict())
+        if "keyset_cache_report" in bagatelle_plan.metadata:
+            metadata["keyset_cache_report"] = bagatelle_plan.metadata["keyset_cache_report"]
         metadata["trajectory_mode"] = trajectory_mode
         metadata["assignment_source"] = "Bagatelle.plan_target_keys"
         if trajectory_mode == TRAJECTORY_MODE_JOINT_SPACE_STRAIGHTEN:

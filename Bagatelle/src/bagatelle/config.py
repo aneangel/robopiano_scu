@@ -46,6 +46,14 @@ class BagatelleConfig:
     ik_static_contact_residual_weight: float = 10.0
     ik_static_contact_failure_weight: float = 25.0
 
+    # Per-song keyset fingerprint cache for IK short-circuiting.
+    # off               : no cache, baseline behavior
+    # exact_only        : on exact (active_keys, finger_assignment) match, skip LM and reuse cached qpos
+    # exact_and_warm_start : exact-match short-circuit + near-miss seeds returned as warm starts (not yet plumbed)
+    ik_cache_mode: str = "off"
+    ik_cache_jaccard_threshold: float = 0.8
+    ik_cache_estimated_seconds_per_ik: float = 0.4
+
     # Optional RP1M-derived Rhapsody IK seed. This does not replace the
     # physics-backed IK/contact validation; it proposes an initial hand state
     # for the existing least-squares solve.

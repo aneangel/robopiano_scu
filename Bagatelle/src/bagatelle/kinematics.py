@@ -588,6 +588,7 @@ class BagatelleKinematics:
         previous_qpos: np.ndarray,
         neutral_qpos: np.ndarray | None = None,
         config: BagatelleConfig | None = None,
+        cache: "KeysetCache | None" = None,
     ) -> IKResult:
         cfg = config or self.config
         previous = self.clip_qpos(previous_qpos)
@@ -605,6 +606,33 @@ class BagatelleKinematics:
                 nfev=0,
                 threshold=float(cfg.residual_success_threshold),
             )
+
+        # Keyset cache exact-hit short-circuit. If a previous identical-assignment
+        # solve produced an acceptable pose, reuse it and skip scipy LM entirely.
+        cache_key = None
+        if cache is not None and cache.mode != "off":
+            cache_key = cache.make_key(
+                active_keys=np.asarray(assignments.assigned_keys, dtype=np.int32),
+                hand_assignment=tuple(
+                    "L" if int(f) < 5 else "R"
+                    for f in assignments.assigned_finger_indices.tolist()
+                ),
+                finger_assignment=tuple(int(f) for f in assignments.assigned_finger_indices.tolist()),
+            )
+            cached_qpos, hit_kind = cache.lookup(cache_key)
+            if hit_kind == "exact" and cached_qpos is not None:
+                fingertips = self.fingertip_positions_for_qpos(cached_qpos)
+                return self._result_from_pose(
+                    cached_qpos,
+                    fingertips,
+                    assignments,
+                    optimizer_success=True,
+                    optimizer_status=0,
+                    optimizer_message="keyset_cache_exact_hit",
+                    optimizer_cost=0.0,
+                    nfev=0,
+                    threshold=float(cfg.residual_success_threshold),
+                )
 
         finger_indices = assignments.assigned_finger_indices.astype(np.int64)
         target_positions = assignments.target_positions.astype(np.float32)
@@ -748,6 +776,8 @@ class BagatelleKinematics:
                 not bool(result.success) and bool(getattr(cfg, "ik_multistart_on_failure", True))
             ) or rhapsody_seed is not None
             if not try_extra_seeds:
+                if cache is not None and cache_key is not None and bool(result.success):
+                    cache.insert(cache_key, result.pose, float(result.residual_norm))
                 return result
             extra_seeds: list[np.ndarray] = []
             if rhapsody_seed is not None:
@@ -772,7 +802,11 @@ class BagatelleKinematics:
                 if is_better:
                     best = candidate
                 if not validate_static_contacts and bool(candidate.success):
+                    if cache is not None and cache_key is not None:
+                        cache.insert(cache_key, candidate.pose, float(candidate.residual_norm))
                     return candidate
+            if cache is not None and cache_key is not None and bool(best.success):
+                cache.insert(cache_key, best.pose, float(best.residual_norm))
             return best
         except Exception as exc:
             fingertips = self.fingertip_positions_for_qpos(previous)

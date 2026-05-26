@@ -14,6 +14,7 @@ from bagatelle.assignment import (
 )
 from bagatelle.config import BagatelleConfig
 from bagatelle.kinematics import FINGER_ORDER, HAND_STATE_DIM, JOINT_ORDER, JOINT_INDEX_RANGES_BY_HAND, BagatelleKinematics, IKResult
+from bagatelle.keyset_cache import KeysetCache
 from bagatelle.paths import ensure_repo_paths
 
 ensure_repo_paths()
@@ -478,6 +479,15 @@ def plan_target_keys(
     kinematics: Any | None = None,
 ) -> BagatelleTrajectory:
     cfg = config or BagatelleConfig()
+    keyset_cache_mode = str(getattr(cfg, "ik_cache_mode", "off"))
+    keyset_cache: KeysetCache | None = None
+    if keyset_cache_mode != "off":
+        keyset_cache = KeysetCache(
+            mode=keyset_cache_mode,
+            jaccard_threshold=float(getattr(cfg, "ik_cache_jaccard_threshold", 0.8)),
+            max_residual_for_insert=float(cfg.residual_success_threshold),
+            estimated_seconds_per_ik=float(getattr(cfg, "ik_cache_estimated_seconds_per_ik", 0.4)),
+        )
     keys = validate_target_keys(target_keys)
     waypoint_frames = extract_waypoint_frames(keys, threshold=float(cfg.threshold))
     waypoint_target_keys = keys[waypoint_frames] if waypoint_frames.size else np.zeros((0, 88), dtype=np.float32)
@@ -586,6 +596,7 @@ def plan_target_keys(
                         previous_qpos,
                         neutral_qpos=neutral_qpos,
                         config=candidate_scoring_cfg,
+                        cache=keyset_cache,
                     )
                     score, crossing, motion = _sequence_beam_score(
                         candidate_base_cost=float(candidate.base_cost),
@@ -622,6 +633,7 @@ def plan_target_keys(
                         previous_qpos,
                         neutral_qpos=neutral_qpos,
                         config=cfg,
+                        cache=keyset_cache,
                     )
                 if waypoint_index < 500 and candidate_diagnostics:
                     for diagnostic in reversed(candidate_diagnostics):
@@ -668,7 +680,7 @@ def plan_target_keys(
                         assignment,
                         target_positions=press_targets[assignment.assigned_key_positions].astype(np.float32),
                     )
-                result = kin.solve_press_pose(assignment, previous_qpos, neutral_qpos=neutral_qpos, config=cfg)
+                result = kin.solve_press_pose(assignment, previous_qpos, neutral_qpos=neutral_qpos, config=cfg, cache=keyset_cache)
 
             waypoint_poses.append(result.pose.astype(np.float32))
             waypoint_fingertips.append(result.fingertip_positions.astype(np.float32))
@@ -732,6 +744,8 @@ def plan_target_keys(
         )
         metadata["planned_hand_joints_shape"] = list(planned.shape)
         metadata["planned_hand_velocities_shape"] = list(velocities.shape)
+        if keyset_cache is not None:
+            metadata["keyset_cache_report"] = keyset_cache.report()
 
         return BagatelleTrajectory(
             target_keys=keys,

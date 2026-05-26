@@ -118,6 +118,8 @@ class ImpromptuConfig:
     ik_static_contact_missed_key_weight: float = 2.0
     ik_static_contact_residual_weight: float = 10.0
     ik_static_contact_failure_weight: float = 25.0
+    ik_cache_mode: str = "off"
+    ik_cache_jaccard_threshold: float = 0.8
     rhapsody_ik_enabled: bool = False
     rhapsody_ik_checkpoint: str = ""
     rhapsody_ik_refinement_steps: int = 0
