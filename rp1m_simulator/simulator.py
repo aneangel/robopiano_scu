@@ -19,6 +19,7 @@ import numpy as np
 RolloutMode = Literal["hand_state", "action"]
 ActionSourceScale = Literal["normalized_minus_one_to_one", "actuator_units"]
 ActionMapping = Literal["as_is", "swap_hands", "zero_sustain", "invert_sustain", "swap_hands_zero_sustain"]
+ActionSubstepPolicy = Literal["zero_pad_hold", "zero_control", "zero_source", "repeat"]
 HandStateActionSource = Literal["recorded", "zero"]
 HandAnchorApplication = Literal["compile_time", "post_reset"]
 WristActionPolicy = Literal["recorded", "hold_initial"]
@@ -30,6 +31,12 @@ ACTION_MAPPINGS: tuple[ActionMapping, ...] = (
     "zero_sustain",
     "invert_sustain",
     "swap_hands_zero_sustain",
+)
+ACTION_SUBSTEP_POLICIES: tuple[ActionSubstepPolicy, ...] = (
+    "zero_pad_hold",
+    "zero_control",
+    "zero_source",
+    "repeat",
 )
 
 DEFAULT_RP1M_ROOT = "/WAVE/datasets/ccoelho_lab-jlanders/rp1m.zarr"
@@ -62,6 +69,7 @@ class RolloutConfig:
     reduced_action_space: bool = True
     action_source_scale: ActionSourceScale = "normalized_minus_one_to_one"
     action_mapping: ActionMapping = "as_is"
+    action_substep_policy: ActionSubstepPolicy = "zero_pad_hold"
     wrist_action_policy: WristActionPolicy = "hold_initial"
     hand_state_action_source: HandStateActionSource = "recorded"
     restore_initial_hand: bool = True
@@ -524,6 +532,37 @@ def _capture_piano_activation(env: Any) -> np.ndarray | None:
     return None
 
 
+def _action_runtime_config(config: RolloutConfig, action_dim: int) -> tuple[RolloutConfig, dict[str, Any]]:
+    """Resolve action-only defaults that should not alter hand-state playback."""
+    if config.mode != "action":
+        return config, {"mode": config.mode, "adjustments": {}}
+
+    updates: dict[str, Any] = {}
+    adjustments: dict[str, str] = {}
+    if int(action_dim) == 39 and not config.reduced_action_space:
+        updates["reduced_action_space"] = True
+        adjustments["reduced_action_space"] = "forced_true_for_39d_compressed_rp1m_actions"
+    if config.restore_initial_hand:
+        updates["restore_initial_hand"] = False
+        adjustments["restore_initial_hand"] = "disabled_for_action_mode_default_reset_hand_state"
+    if config.set_hand_qvel:
+        updates["set_hand_qvel"] = False
+        adjustments["set_hand_qvel"] = "disabled_because_action_mode_uses_default_reset_hand_state"
+    if config.hand_resync_interval is not None:
+        updates["hand_resync_interval"] = None
+        adjustments["hand_resync_interval"] = "disabled_because_action_mode_must_not_resync_from_rp1m_hand_state"
+
+    runtime_config = replace(config, **updates) if updates else config
+    return runtime_config, {
+        "mode": config.mode,
+        "action_input_dim": int(action_dim),
+        "action_input_format": "compressed_39d" if int(action_dim) == 39 else "environment_action_spec",
+        "initial_hand_state": "robopianist_reset_default_qpos_qvel",
+        "hand_anchor_policy": "preserve_configured_anchor_or_auto_calibration",
+        "adjustments": adjustments,
+    }
+
+
 def _scale_action_to_spec(action: np.ndarray, action_spec: Any, *, source: ActionSourceScale) -> np.ndarray:
     values = np.asarray(action, dtype=np.float32).reshape(-1)
     minimum = np.asarray(action_spec.minimum, dtype=np.float32).reshape(-1)
@@ -836,10 +875,35 @@ def simulate_rp1m_rollout(
 
     if config.mode not in {"hand_state", "action"}:
         raise ValueError(f"Unknown rollout mode: {config.mode}")
-    control_timestep = float(config.simulation_timestep)
-    substeps = int(round(float(config.dataset_timestep) / float(config.simulation_timestep)))
-    if substeps < 1 or not np.isclose(substeps * control_timestep, float(config.dataset_timestep), rtol=1e-4, atol=1e-7):
+    runtime_config, runtime_policy = _action_runtime_config(config, int(actions.shape[-1]))
+    if runtime_config.max_source_steps is not None:
+        source_steps = min(source_steps, int(runtime_config.max_source_steps))
+
+    control_timestep = float(runtime_config.simulation_timestep)
+    substeps = int(round(float(runtime_config.dataset_timestep) / float(runtime_config.simulation_timestep)))
+    if substeps < 1 or not np.isclose(
+        substeps * control_timestep,
+        float(runtime_config.dataset_timestep),
+        rtol=1e-4,
+        atol=1e-7,
+    ):
         raise ValueError("dataset_timestep must be an integer multiple of simulation_timestep")
+    if runtime_config.mode == "action":
+        if runtime_config.action_substep_policy not in ACTION_SUBSTEP_POLICIES:
+            raise ValueError(f"Unknown action_substep_policy: {runtime_config.action_substep_policy}")
+        runtime_policy["action_substep_policy"] = runtime_config.action_substep_policy
+        runtime_policy["action_source_substeps_per_source_step"] = (
+            int(substeps) if runtime_config.action_substep_policy == "repeat" else 1
+        )
+        runtime_policy["action_zero_padded_substeps_per_source_step"] = (
+            0 if runtime_config.action_substep_policy == "repeat" else max(int(substeps) - 1, 0)
+        )
+        runtime_policy["action_substep_policy_note"] = {
+            "repeat": "repeat each RP1M source action on every simulator substep",
+            "zero_control": "send actuator-unit zero controls after the first source substep",
+            "zero_source": "send normalized-source zero actions after the first source substep",
+            "zero_pad_hold": "zero-pad sparse RP1M source commands but hold the previous actuator target between commands",
+        }[runtime_config.action_substep_policy]
     dense_goals = np.repeat(goals[:source_steps, :88], substeps, axis=0)
 
     midi_proto = write_goals_proto(
@@ -848,9 +912,9 @@ def simulate_rp1m_rollout(
         dt=control_timestep,
         title=f"RP1M simulator {trajectory.song_key} demo {trajectory.demo_id}",
     )
-    hand_anchor_calibration = _calibrate_hand_anchor_y_offset(trajectory, config, midi_proto, control_timestep)
+    hand_anchor_calibration = _calibrate_hand_anchor_y_offset(trajectory, runtime_config, midi_proto, control_timestep)
     effective_config = replace(
-        config,
+        runtime_config,
         hand_anchor_y_offset=hand_anchor_calibration.get("effective_hand_anchor_y_offset"),
         auto_hand_anchor_y_offset=False,
     )
@@ -869,6 +933,12 @@ def simulate_rp1m_rollout(
     post_reset_hand_anchor = {"applied": False, "hand_anchor_y_offset": None}
     mujoco_options_applied: dict[str, int] = {}
     control_overrides: dict[int, float] = {}
+    initial_hand_policy: dict[str, Any] = {
+        "state_source": "rp1m_hand_joints_0" if effective_config.restore_initial_hand else "robopianist_reset_default",
+        "qpos_restored": False,
+        "qvel_restored": False,
+        "wrist_override_source": None,
+    }
     try:
         env.reset()
         task, physics, _piano = _locate_task_physics_piano(env)
@@ -879,62 +949,98 @@ def simulate_rp1m_rollout(
                 physics,
                 effective_config.hand_anchor_y_offset,
             )
-        if config.restore_initial_hand:
+        if effective_config.restore_initial_hand:
             qpos_restored = _set_hand_qpos(task, physics, hand_joints[0])
-            if config.set_hand_qvel:
-                initial_qvel = float(config.initial_hand_qvel_scale) * _qvel_between(
+            initial_hand_policy["qpos_restored"] = bool(qpos_restored)
+            if effective_config.set_hand_qvel:
+                initial_qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(
                     hand_joints,
                     0,
-                    config.dataset_timestep,
+                    effective_config.dataset_timestep,
                 )
                 qvel_restored = _set_hand_qvel(task, physics, initial_qvel)
+                initial_hand_policy["qvel_restored"] = bool(qvel_restored)
             if hasattr(physics, "forward"):
                 physics.forward()
         action_spec = env.action_spec()
-        if int(actions.shape[-1]) != int(action_spec.shape[0]):
-            raise ValueError(f"Action dimension mismatch: RP1M has {actions.shape[-1]}, environment expects {action_spec.shape[0]}")
-        if config.mode == "action":
-            control_overrides = _initial_wrist_control_overrides(hand_joints[0], action_spec, effective_config)
-        render_stride = max(int(config.render_every_source_step), 1)
+        action_dim = int(actions.shape[-1])
+        action_spec_dim = int(action_spec.shape[0])
+        load_info["action_spec_shape"] = [action_spec_dim]
+        load_info["action_input_dim"] = action_dim
+        load_info["action_input_format"] = runtime_policy.get("action_input_format")
+        if action_dim != action_spec_dim:
+            hint = " Use reduced_action_space=True for compressed 39D RP1M actions." if action_dim == 39 else ""
+            raise ValueError(f"Action dimension mismatch: RP1M has {action_dim}, environment expects {action_spec_dim}.{hint}")
+        if effective_config.mode == "action":
+            wrist_qpos = _capture_hand_qpos(task, physics)
+            if effective_config.restore_initial_hand:
+                wrist_qpos = hand_joints[0]
+                initial_hand_policy["wrist_override_source"] = "rp1m_hand_joints_0"
+            elif wrist_qpos is not None:
+                initial_hand_policy["wrist_override_source"] = "robopianist_reset_default"
+            else:
+                wrist_qpos = np.zeros((0,), dtype=np.float32)
+                initial_hand_policy["wrist_override_source"] = "unavailable"
+            control_overrides = _initial_wrist_control_overrides(wrist_qpos, action_spec, effective_config)
+        render_stride = max(int(effective_config.render_every_source_step), 1)
         zero_action = np.zeros_like(actions[0])
+        held_action_control: np.ndarray | None = None
         for source_t in range(source_steps):
             interval: list[np.ndarray] = []
             next_t = min(source_t + 1, source_steps - 1)
             if (
-                config.mode == "action"
-                and config.hand_resync_interval is not None
-                and int(config.hand_resync_interval) > 0
+                effective_config.mode == "action"
+                and effective_config.hand_resync_interval is not None
+                and int(effective_config.hand_resync_interval) > 0
                 and source_t > 0
-                and source_t % int(config.hand_resync_interval) == 0
+                and source_t % int(effective_config.hand_resync_interval) == 0
             ):
                 task, physics, _piano = _locate_task_physics_piano(env)
                 qpos_restored = _set_hand_qpos(task, physics, hand_joints[source_t])
                 hand_resync_count += 1
-                if config.set_hand_qvel:
-                    qvel = float(config.initial_hand_qvel_scale) * _qvel_between(
+                if effective_config.set_hand_qvel:
+                    qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(
                         hand_joints,
                         source_t,
-                        config.dataset_timestep,
+                        effective_config.dataset_timestep,
                     )
                     qvel_restored = _set_hand_qvel(task, physics, qvel)
                 if hasattr(physics, "forward"):
                     physics.forward()
             for substep in range(substeps):
-                if config.mode == "hand_state":
+                if effective_config.mode == "hand_state":
                     alpha = float(substep) / float(substeps)
                     qpos = ((1.0 - alpha) * hand_joints[source_t] + alpha * hand_joints[next_t]).astype(np.float32)
-                    qvel = ((hand_joints[next_t] - hand_joints[source_t]) / float(config.dataset_timestep)).astype(np.float32)
+                    qvel = (
+                        (hand_joints[next_t] - hand_joints[source_t]) / float(effective_config.dataset_timestep)
+                    ).astype(np.float32)
                     task, physics, _piano = _locate_task_physics_piano(env)
                     qpos_restored = _set_hand_qpos(task, physics, qpos)
-                    if config.set_hand_qvel:
+                    if effective_config.set_hand_qvel:
                         qvel_restored = _set_hand_qvel(task, physics, qvel)
                     if hasattr(physics, "forward"):
                         physics.forward()
-                    action = actions[source_t] if config.hand_state_action_source == "recorded" else zero_action
+                    action = actions[source_t] if effective_config.hand_state_action_source == "recorded" else zero_action
                 else:
                     action = actions[source_t]
-                control = _prepare_control(action, action_spec, config)
-                if config.mode == "action":
+                if effective_config.mode == "action" and substep > 0:
+                    if effective_config.action_substep_policy == "repeat":
+                        control = _prepare_control(action, action_spec, effective_config)
+                    elif effective_config.action_substep_policy == "zero_control":
+                        control = np.zeros(action_spec.shape, dtype=np.float32)
+                    elif effective_config.action_substep_policy == "zero_source":
+                        control = _prepare_control(zero_action, action_spec, effective_config)
+                    elif effective_config.action_substep_policy == "zero_pad_hold":
+                        if held_action_control is None:
+                            held_action_control = _prepare_control(action, action_spec, effective_config)
+                        control = held_action_control.copy()
+                    else:
+                        raise ValueError(f"Unknown action_substep_policy: {effective_config.action_substep_policy}")
+                else:
+                    control = _prepare_control(action, action_spec, effective_config)
+                    if effective_config.mode == "action":
+                        held_action_control = control.copy()
+                if effective_config.mode == "action":
                     control = _apply_control_overrides(control, control_overrides)
                 timestep = env.step(control)
                 total_reward += float(timestep.reward or 0.0)
@@ -953,16 +1059,30 @@ def simulate_rp1m_rollout(
                 source_hand.append(hand.astype(np.float32))
             if interval:
                 source_played.append(np.max(np.stack(interval, axis=0), axis=0).astype(np.float32))
-            if config.render_mp4 and source_t % render_stride == 0 and render_error is None:
+            if effective_config.render_mp4 and source_t % render_stride == 0 and render_error is None:
                 try:
-                    frames.append(render_frame(env, height=config.height, width=config.width, camera_id=config.camera_id))
+                    frames.append(
+                        render_frame(
+                            env,
+                            height=effective_config.height,
+                            width=effective_config.width,
+                            camera_id=effective_config.camera_id,
+                        )
+                    )
                 except Exception as exc:
                     render_error = str(exc)
             if terminated:
                 break
-        if config.render_mp4 and render_error is None:
+        if effective_config.render_mp4 and render_error is None:
             try:
-                frames.append(render_frame(env, height=config.height, width=config.width, camera_id=config.camera_id))
+                frames.append(
+                    render_frame(
+                        env,
+                        height=effective_config.height,
+                        width=effective_config.width,
+                        camera_id=effective_config.camera_id,
+                    )
+                )
             except Exception as exc:
                 render_error = str(exc)
     finally:
@@ -990,15 +1110,19 @@ def simulate_rp1m_rollout(
 
     video_path = None
     audio_warning = None
-    if config.render_mp4 and render_error is None:
+    if effective_config.render_mp4 and render_error is None:
         audio_roll = dense_played_arr
         audio_dt = control_timestep
-        events = piano_roll_to_midi_events(audio_roll, dt=audio_dt, threshold=config.threshold) if config.render_audio else None
-        video_path, audio_warning = write_video(frames, output / "rollout.mp4", fps=config.fps, audio_events=events)
+        events = (
+            piano_roll_to_midi_events(audio_roll, dt=audio_dt, threshold=effective_config.threshold)
+            if effective_config.render_audio
+            else None
+        )
+        video_path, audio_warning = write_video(frames, output / "rollout.mp4", fps=effective_config.fps, audio_events=events)
 
     hand_l2 = None
     if source_hand_arr.size:
-        if config.mode == "action" and hand_joints.shape[0] > 1:
+        if effective_config.mode == "action" and hand_joints.shape[0] > 1:
             reference_hand = hand_joints[1:, : source_hand_arr.shape[1]]
             alignment = "after_action_t_vs_rp1m_hand_joints_t_plus_1"
         else:
@@ -1023,6 +1147,8 @@ def simulate_rp1m_rollout(
         "reference_piano_state_policy": "scoring_only" if trajectory.reference_piano_states is not None else "not_loaded",
         "config": asdict(config),
         "effective_config": asdict(effective_config),
+        "runtime_policy": runtime_policy,
+        "initial_hand_policy": initial_hand_policy,
         "hand_anchor_calibration": hand_anchor_calibration,
         "post_reset_hand_anchor": post_reset_hand_anchor,
         "mujoco_options_applied": mujoco_options_applied,
@@ -1042,8 +1168,12 @@ def simulate_rp1m_rollout(
         "qpos_restored_count": int(qpos_restored),
         "qvel_restored_count": int(qvel_restored),
         "hand_resync_policy": {
-            "interval": None if config.hand_resync_interval is None else int(config.hand_resync_interval),
-            "uses_rp1m_hand_joints": bool(config.hand_resync_interval is not None),
+            "interval": (
+                None
+                if effective_config.hand_resync_interval is None
+                else int(effective_config.hand_resync_interval)
+            ),
+            "uses_rp1m_hand_joints": bool(effective_config.hand_resync_interval is not None),
             "resync_count": int(hand_resync_count),
         },
         "hand_qpos_l2_vs_reference": hand_l2,
@@ -1052,12 +1182,12 @@ def simulate_rp1m_rollout(
         "rendered_frames": int(len(frames)),
         "render_error": render_error,
         "audio_warning": audio_warning,
-        "recorded_reference_against_goals": _recorded_reference_score(trajectory, config.threshold),
+        "recorded_reference_against_goals": _recorded_reference_score(trajectory, effective_config.threshold),
         **_score_rollout(
             played=source_played_arr,
             goals=goals,
             reference_piano_states=trajectory.reference_piano_states,
-            threshold=config.threshold,
+            threshold=effective_config.threshold,
         ),
     }
     save_json(output / "summary.json", summary)

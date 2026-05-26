@@ -141,6 +141,7 @@ def load_raw_episode(
 def make_rollout_config(
     *,
     dataset_timestep: float,
+    simulation_timestep: float | None = 0.005,
     seed: int = 0,
     threshold: float = 0.5,
     render_mp4: bool = False,
@@ -151,9 +152,13 @@ def make_rollout_config(
     fps: int = 20,
     action_source_scale: str = "normalized_minus_one_to_one",
     action_mapping: str = "as_is",
+    action_substep_policy: str = "zero_pad_hold",
+    wrist_action_policy: str = "hold_initial",
     reduced_action_space: bool = True,
     hand_anchor_y_offset: float | None = rp1m.DEFAULT_HAND_ANCHOR_Y_OFFSET,
     auto_hand_anchor_y_offset: bool = False,
+    restore_initial_hand: bool = False,
+    set_hand_qvel: bool = False,
     gravity_compensation: bool = False,
     primitive_fingertip_collisions: bool = False,
     disable_hand_collisions: bool = False,
@@ -161,15 +166,17 @@ def make_rollout_config(
     return RolloutConfig(
         mode="action",
         dataset_timestep=float(dataset_timestep),
-        simulation_timestep=float(dataset_timestep),
+        simulation_timestep=float(dataset_timestep if simulation_timestep is None else simulation_timestep),
         hand_anchor_y_offset=hand_anchor_y_offset,
         auto_hand_anchor_y_offset=bool(auto_hand_anchor_y_offset),
         reduced_action_space=bool(reduced_action_space),
         action_source_scale=str(action_source_scale),  # type: ignore[arg-type]
         action_mapping=str(action_mapping),  # type: ignore[arg-type]
+        action_substep_policy=str(action_substep_policy),  # type: ignore[arg-type]
+        wrist_action_policy=str(wrist_action_policy),  # type: ignore[arg-type]
         hand_state_action_source="recorded",
-        restore_initial_hand=True,
-        set_hand_qvel=True,
+        restore_initial_hand=bool(restore_initial_hand),
+        set_hand_qvel=bool(set_hand_qvel),
         gravity_compensation=bool(gravity_compensation),
         primitive_fingertip_collisions=bool(primitive_fingertip_collisions),
         disable_hand_collisions=bool(disable_hand_collisions),
@@ -225,12 +232,19 @@ def rollout_loaded_policy_with_rp1m_simulator(
 
     output = rp1m.ensure_dir(output_dir)
     sim_config = rollout_config or make_rollout_config(dataset_timestep=dt)
-    sim_config = replace(sim_config, mode="action", dataset_timestep=dt, simulation_timestep=dt)
+    sim_config = replace(sim_config, mode="action", dataset_timestep=dt)
+    control_dt = float(sim_config.simulation_timestep)
+    substeps = int(round(dt / control_dt))
+    if substeps < 1 or not np.isclose(substeps * control_dt, dt, rtol=1e-4, atol=1e-7):
+        raise ValueError("Fugue rollout dataset timestep must be an integer multiple of simulation_timestep")
+    if sim_config.action_substep_policy not in rp1m.ACTION_SUBSTEP_POLICIES:
+        raise ValueError(f"Unknown action_substep_policy: {sim_config.action_substep_policy}")
     environment = environment_name or rp1m.canonicalize_environment_name(song_key)
+    dense_goals = np.repeat(goals[:source_steps], substeps, axis=0)
     midi_proto = rp1m.write_goals_proto(
-        goals[:source_steps],
+        dense_goals,
         output / "target_goals.proto",
-        dt=dt,
+        dt=control_dt,
         title=f"Fugue closed-loop {song_key} demo {demo_id}",
     )
     trajectory = rp1m.make_rp1m_trajectory_from_arrays(
@@ -243,15 +257,16 @@ def rollout_loaded_policy_with_rp1m_simulator(
         reference_piano_states=None if piano_ref is None else piano_ref[:source_steps],
         environment_name=environment,
     )
-    hand_anchor_calibration = rp1m._calibrate_hand_anchor_y_offset(trajectory, sim_config, midi_proto, dt)
+    hand_anchor_calibration = rp1m._calibrate_hand_anchor_y_offset(trajectory, sim_config, midi_proto, control_dt)
     effective_config = replace(
         sim_config,
         hand_anchor_y_offset=hand_anchor_calibration.get("effective_hand_anchor_y_offset"),
         auto_hand_anchor_y_offset=False,
     )
-    env, load_info = rp1m._load_env(effective_config, midi_proto, trajectory.environment_name, dt)
+    env, load_info = rp1m._load_env(effective_config, midi_proto, trajectory.environment_name, control_dt)
 
     source_played: list[np.ndarray] = []
+    dense_played: list[np.ndarray] = []
     frames: list[np.ndarray] = []
     sim_hand: list[np.ndarray] = []
     predicted_actions: list[np.ndarray] = []
@@ -269,20 +284,32 @@ def rollout_loaded_policy_with_rp1m_simulator(
     actions_executed = 0
     qpos_restored = 0
     qvel_restored = 0
+    post_reset_hand_anchor = {"applied": False, "hand_anchor_y_offset": None}
+    control_overrides: dict[int, float] = {}
 
     try:
         env.reset()
         task, physics, _piano = rp1m._locate_task_physics_piano(env)
-        qpos_restored = rp1m._set_hand_qpos(task, physics, q_ref[0])
-        qvel_restored = rp1m._set_hand_qvel(task, physics, _qvel_between(q_ref, 0, dt))
-        if hasattr(physics, "forward"):
-            physics.forward()
+        if effective_config.hand_anchor_application == "post_reset":
+            post_reset_hand_anchor = rp1m._apply_post_reset_hand_anchor_y_offset(
+                task,
+                physics,
+                effective_config.hand_anchor_y_offset,
+            )
+        if effective_config.restore_initial_hand:
+            qpos_restored = rp1m._set_hand_qpos(task, physics, q_ref[0])
+            if effective_config.set_hand_qvel:
+                qvel_restored = rp1m._set_hand_qvel(task, physics, _qvel_between(q_ref, 0, dt))
+            if hasattr(physics, "forward"):
+                physics.forward()
         current_q = rp1m._capture_hand_qpos(task, physics)
         if current_q is None:
             current_q = q_ref[0].copy()
         current_q = np.asarray(current_q, dtype=np.float32)
         previous_q = current_q.copy()
         action_spec = env.action_spec()
+        wrist_qpos = q_ref[0] if effective_config.restore_initial_hand else current_q
+        control_overrides = rp1m._initial_wrist_control_overrides(wrist_qpos, action_spec, effective_config)
         if int(policy.checkpoint["action_dim"]) != int(action_spec.shape[0]):
             raise ValueError(
                 f"Checkpoint action_dim={policy.checkpoint['action_dim']} does not match "
@@ -339,22 +366,44 @@ def rollout_loaded_policy_with_rp1m_simulator(
                 raw_action = unstandardize(pred_norm.reshape(1, -1), policy.stats.action_mean, policy.stats.action_std)[0]
                 action = _apply_action_parameters(raw_action, previous_action=previous_action, params=params)
                 executed_norm = standardize(action.reshape(1, -1), policy.stats.action_mean, policy.stats.action_std)[0]
-                control = rp1m._prepare_control(action, action_spec, effective_config)
                 start_q = current_q.copy()
                 q_history.append(start_q.astype(np.float32))
                 qvel_history.append(current_qvel.astype(np.float32))
                 q_history = q_history[-max(int(policy.sample_config.history) - 1, 0) :]
                 qvel_history = qvel_history[-max(int(policy.sample_config.history) - 1, 0) :]
-                timestep = env.step(control)
-                total_reward += float(timestep.reward or 0.0)
-                actions_executed += 1
+                prepared_control = rp1m._prepare_control(action, action_spec, effective_config)
+                held_control = prepared_control.copy()
+                interval_played: list[np.ndarray] = []
+                timestep = None
+                for substep in range(substeps):
+                    if substep == 0 or effective_config.action_substep_policy == "repeat":
+                        control = prepared_control.copy()
+                    elif effective_config.action_substep_policy == "zero_control":
+                        control = np.zeros(action_spec.shape, dtype=np.float32)
+                    elif effective_config.action_substep_policy == "zero_source":
+                        control = rp1m._prepare_control(np.zeros_like(action), action_spec, effective_config)
+                    elif effective_config.action_substep_policy == "zero_pad_hold":
+                        control = held_control.copy()
+                    else:
+                        raise ValueError(f"Unknown action_substep_policy: {effective_config.action_substep_policy}")
+                    control = rp1m._apply_control_overrides(control, control_overrides)
+                    timestep = env.step(control)
+                    total_reward += float(timestep.reward or 0.0)
+                    actions_executed += 1
+                    activation = rp1m._capture_piano_activation(env)
+                    if activation is not None:
+                        activation = np.asarray(activation, dtype=np.float32)[:88]
+                        interval_played.append(activation)
+                        dense_played.append(activation)
+                    if timestep.last():
+                        terminated = True
+                        break
                 raw_predicted_actions.append(raw_action.astype(np.float32))
                 predicted_actions.append(action.astype(np.float32))
                 executed_norm_actions.append(executed_norm.astype(np.float32))
                 previous_action = action.astype(np.float32)
-                activation = rp1m._capture_piano_activation(env)
-                if activation is not None:
-                    source_played.append(np.asarray(activation, dtype=np.float32)[:88])
+                if interval_played:
+                    source_played.append(np.max(np.stack(interval_played, axis=0), axis=0).astype(np.float32))
                 task, physics, _piano = rp1m._locate_task_physics_piano(env)
                 pose = rp1m._capture_hand_qpos(task, physics)
                 if pose is not None:
@@ -383,8 +432,7 @@ def rollout_loaded_policy_with_rp1m_simulator(
                     events=adaptation_events,
                     threshold=float(effective_config.threshold),
                 )
-                if timestep.last():
-                    terminated = True
+                if timestep is not None and timestep.last():
                     break
     finally:
         close = getattr(env, "close", None)
@@ -392,6 +440,7 @@ def rollout_loaded_policy_with_rp1m_simulator(
             close()
 
     played_arr = np.stack(source_played, axis=0) if source_played else np.zeros((0, 88), dtype=np.float32)
+    dense_played_arr = np.stack(dense_played, axis=0) if dense_played else np.zeros((0, 88), dtype=np.float32)
     pred_arr = np.stack(predicted_actions, axis=0) if predicted_actions else np.zeros((0, reference_actions.shape[-1]), dtype=np.float32)
     raw_pred_arr = np.stack(raw_predicted_actions, axis=0) if raw_predicted_actions else np.zeros_like(pred_arr)
     norm_arr = np.stack(executed_norm_actions, axis=0) if executed_norm_actions else np.zeros_like(pred_arr)
@@ -401,6 +450,7 @@ def rollout_loaded_policy_with_rp1m_simulator(
     np.savez_compressed(
         npz_path,
         played_piano=played_arr,
+        dense_played_piano=dense_played_arr,
         predicted_actions=pred_arr,
         raw_predicted_actions=raw_pred_arr,
         executed_actions_normalized=norm_arr,
@@ -417,7 +467,7 @@ def rollout_loaded_policy_with_rp1m_simulator(
     audio_warning = None
     if effective_config.render_mp4 and render_error is None:
         events = (
-            rp1m.piano_roll_to_midi_events(played_arr, dt=dt, threshold=float(effective_config.threshold))
+            rp1m.piano_roll_to_midi_events(dense_played_arr, dt=control_dt, threshold=float(effective_config.threshold))
             if effective_config.render_audio
             else None
         )
@@ -448,11 +498,21 @@ def rollout_loaded_policy_with_rp1m_simulator(
         "rollout_backend": "rp1m_simulator",
         "piano_state_policy": "not_restored_or_used_by_simulator",
         "reference_piano_state_policy": "scoring_only" if piano_ref is not None else "not_loaded",
-        "initial_hand_restored": True,
+        "initial_hand_restored": bool(effective_config.restore_initial_hand),
         "qpos_restored_count": int(qpos_restored),
         "qvel_restored_count": int(qvel_restored),
+        "post_reset_hand_anchor": post_reset_hand_anchor,
+        "action_control_overrides": {
+            "wrist_action_policy": effective_config.wrist_action_policy,
+            "indices": sorted(int(idx) for idx in control_overrides),
+            "values": {str(idx): float(value) for idx, value in sorted(control_overrides.items())},
+        },
         "source_steps_requested": int(source_steps),
         "source_steps_played": int(played_arr.shape[0]),
+        "dense_steps_played": int(dense_played_arr.shape[0]),
+        "control_timestep": float(control_dt),
+        "substeps_per_source_step": int(substeps),
+        "action_substep_policy": str(effective_config.action_substep_policy),
         "actions_executed": int(actions_executed),
         "terminated": bool(terminated),
         "total_reward": float(total_reward),

@@ -32,6 +32,7 @@ def _add_rollout_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hand-state-action-source", choices=["recorded", "zero"], default="recorded")
     parser.add_argument("--action-source-scale", choices=["normalized_minus_one_to_one", "actuator_units"], default="normalized_minus_one_to_one")
     parser.add_argument("--action-mapping", choices=["as_is", "swap_hands", "zero_sustain", "invert_sustain", "swap_hands_zero_sustain"], default="as_is")
+    parser.add_argument("--action-substep-policy", choices=["zero_pad_hold", "zero_control", "zero_source", "repeat"], default="zero_pad_hold")
     parser.add_argument("--wrist-action-policy", choices=["hold_initial", "recorded"], default="hold_initial")
     parser.add_argument("--full-action-space", dest="reduced_action_space", action="store_false")
     parser.set_defaults(reduced_action_space=True)
@@ -74,6 +75,7 @@ def _config_from_args(args: argparse.Namespace) -> RolloutConfig:
         reduced_action_space=args.reduced_action_space,
         action_source_scale=args.action_source_scale,
         action_mapping=args.action_mapping,
+        action_substep_policy=args.action_substep_policy,
         wrist_action_policy=args.wrist_action_policy,
         hand_state_action_source=args.hand_state_action_source,
         restore_initial_hand=args.restore_initial_hand,

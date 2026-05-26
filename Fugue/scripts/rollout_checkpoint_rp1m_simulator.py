@@ -23,7 +23,12 @@ from fugue.rp1m_closed_loop import (  # noqa: E402
     resolve_manifest_examples,
     rollout_loaded_policy_with_rp1m_simulator,
 )
-from rp1m_simulator.simulator import ACTION_MAPPINGS, ACTION_SOURCE_SCALES, DEFAULT_HAND_ANCHOR_Y_OFFSET  # noqa: E402
+from rp1m_simulator.simulator import (  # noqa: E402
+    ACTION_MAPPINGS,
+    ACTION_SOURCE_SCALES,
+    ACTION_SUBSTEP_POLICIES,
+    DEFAULT_HAND_ANCHOR_Y_OFFSET,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--environment-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--simulation-timestep", type=float, default=0.005)
 
     parser.add_argument("--chunk-execution", choices=["first", "temporal_aggregate"], default="first")
     parser.add_argument("--temporal-agg-decay", type=float, default=0.7)
@@ -68,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--action-source-scale", choices=list(ACTION_SOURCE_SCALES), default="normalized_minus_one_to_one")
     parser.add_argument("--action-mapping", choices=list(ACTION_MAPPINGS), default="as_is")
+    parser.add_argument("--action-substep-policy", choices=list(ACTION_SUBSTEP_POLICIES), default="zero_pad_hold")
+    parser.add_argument("--wrist-action-policy", choices=["hold_initial", "recorded"], default="hold_initial")
     parser.add_argument("--full-action-space", dest="reduced_action_space", action="store_false")
     parser.set_defaults(reduced_action_space=True)
     parser.add_argument("--hand-anchor-y-offset", type=float, default=DEFAULT_HAND_ANCHOR_Y_OFFSET)
@@ -137,6 +145,7 @@ def main() -> None:
     )
     rollout_config = make_rollout_config(
         dataset_timestep=dt,
+        simulation_timestep=float(args.simulation_timestep),
         seed=int(args.seed),
         threshold=float(args.threshold),
         render_mp4=bool(args.render_mp4),
@@ -147,9 +156,13 @@ def main() -> None:
         fps=int(args.fps),
         action_source_scale=str(args.action_source_scale),
         action_mapping=str(args.action_mapping),
+        action_substep_policy=str(args.action_substep_policy),
+        wrist_action_policy=str(args.wrist_action_policy),
         reduced_action_space=bool(args.reduced_action_space),
         hand_anchor_y_offset=args.hand_anchor_y_offset,
         auto_hand_anchor_y_offset=bool(args.auto_hand_anchor_y_offset),
+        restore_initial_hand=False,
+        set_hand_qvel=False,
         gravity_compensation=bool(args.gravity_compensation),
         primitive_fingertip_collisions=bool(args.primitive_fingertip_collisions),
         disable_hand_collisions=bool(args.disable_hand_collisions),

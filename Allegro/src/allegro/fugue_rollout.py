@@ -46,12 +46,15 @@ def make_allegro_rollout_config(
     fps: int = 20,
     action_source_scale: str = "normalized_minus_one_to_one",
     action_mapping: str = "as_is",
+    action_substep_policy: str = "zero_pad_hold",
     reduced_action_space: bool = True,
     hand_anchor_y_offset: float | None = rp1m.DEFAULT_HAND_ANCHOR_Y_OFFSET,
     auto_hand_anchor_y_offset: bool = True,
     wrist_action_policy: str = "hold_initial",
     initial_hand_qvel_scale: float = 0.5,
     hand_resync_interval: int | None = None,
+    restore_initial_hand: bool = False,
+    set_hand_qvel: bool = False,
     gravity_compensation: bool = False,
     primitive_fingertip_collisions: bool = False,
     disable_hand_collisions: bool = False,
@@ -68,9 +71,12 @@ def make_allegro_rollout_config(
         fps=int(fps),
         action_source_scale=str(action_source_scale),
         action_mapping=str(action_mapping),
+        action_substep_policy=str(action_substep_policy),
         reduced_action_space=bool(reduced_action_space),
         hand_anchor_y_offset=hand_anchor_y_offset,
         auto_hand_anchor_y_offset=bool(auto_hand_anchor_y_offset),
+        restore_initial_hand=bool(restore_initial_hand),
+        set_hand_qvel=bool(set_hand_qvel),
         gravity_compensation=bool(gravity_compensation),
         primitive_fingertip_collisions=bool(primitive_fingertip_collisions),
         disable_hand_collisions=bool(disable_hand_collisions),
@@ -100,6 +106,10 @@ def rollout_loaded_policy_with_allegro(
     alignment_target_mode: str = "linear",
     base_action_source: str = "fugue",
     alignment_target_power: float = 1.0,
+    dense_target_hand_joints: np.ndarray | None = None,
+    dense_target_hand_velocities: np.ndarray | None = None,
+    dense_goals_override: np.ndarray | None = None,
+    dense_target_source: str | None = None,
     state_correction_gain: float = 0.0,
     state_correction_qvel_scale: float = 1.0,
     post_step_state_correction: bool = False,
@@ -123,18 +133,49 @@ def rollout_loaded_policy_with_allegro(
             f"alignment source_hz={alignment.source_hz} implies dt={alignment.source_dt}, "
             f"but Fugue checkpoint dt={dt}"
         )
+    substeps = int(alignment.substeps_per_source_step)
+    control_dt = float(alignment.control_dt)
     source_steps = min(int(q_ref.shape[0]), int(qvel_ref.shape[0]), int(reference_actions.shape[0]), int(goals.shape[0]))
     if piano_ref is not None:
         source_steps = min(source_steps, int(piano_ref.shape[0]))
     if max_steps is not None:
         source_steps = min(source_steps, int(max_steps))
+    dense_target_q_ref = None
+    dense_target_qvel_ref = None
+    dense_goal_ref = None
+    if dense_target_hand_joints is not None:
+        dense_target_q_ref = np.asarray(dense_target_hand_joints, dtype=np.float32)
+        if dense_target_q_ref.ndim != 2:
+            raise ValueError("dense_target_hand_joints must be a 2D array")
+        if int(dense_target_q_ref.shape[-1]) != int(q_ref.shape[-1]):
+            raise ValueError(
+                "dense_target_hand_joints width does not match source hand joints: "
+                f"{dense_target_q_ref.shape[-1]} != {q_ref.shape[-1]}"
+            )
+        max_source_steps_from_dense = int(dense_target_q_ref.shape[0] // substeps) + 1
+        source_steps = min(source_steps, max_source_steps_from_dense)
+    if dense_target_hand_velocities is not None:
+        dense_target_qvel_ref = np.asarray(dense_target_hand_velocities, dtype=np.float32)
+        if dense_target_qvel_ref.ndim != 2:
+            raise ValueError("dense_target_hand_velocities must be a 2D array")
+        if int(dense_target_qvel_ref.shape[-1]) != int(q_ref.shape[-1]):
+            raise ValueError(
+                "dense_target_hand_velocities width does not match source hand joints: "
+                f"{dense_target_qvel_ref.shape[-1]} != {q_ref.shape[-1]}"
+            )
+    if dense_goals_override is not None:
+        dense_goal_ref = np.asarray(dense_goals_override, dtype=np.float32)[..., :88]
+        if dense_goal_ref.ndim != 2 or int(dense_goal_ref.shape[-1]) != 88:
+            raise ValueError("dense_goals_override must be a 2D piano-roll array with 88 keys")
     if source_steps < 2:
         raise ValueError(f"Need at least two source steps, got {source_steps}")
     lookahead = int(policy.sample_config.lookahead)
     if source_steps <= lookahead + 1:
         raise ValueError(f"Not enough steps for Fugue lookahead={lookahead}: {source_steps}")
-    if alignment_target_mode not in {"linear", "endpoint"}:
+    if alignment_target_mode not in {"linear", "endpoint", "dense"}:
         raise ValueError(f"Unsupported alignment_target_mode={alignment_target_mode!r}")
+    if alignment_target_mode == "dense" and dense_target_q_ref is None:
+        raise ValueError("alignment_target_mode='dense' requires dense_target_hand_joints")
     if base_action_source not in {"fugue", "reference", "zero", "target_qpos_sum", "target_qpos_mean"}:
         raise ValueError(f"Unsupported base_action_source={base_action_source!r}")
     if float(alignment_target_power) <= 0.0:
@@ -147,9 +188,14 @@ def rollout_loaded_policy_with_allegro(
         raise ValueError("state_correction_qvel_scale must be nonnegative")
 
     output = rp1m.ensure_dir(output_dir)
-    substeps = int(alignment.substeps_per_source_step)
-    control_dt = float(alignment.control_dt)
-    dense_goals = np.repeat(goals[:source_steps, :88], substeps, axis=0)
+    if dense_goal_ref is None:
+        dense_goals = np.repeat(goals[:source_steps, :88], substeps, axis=0)
+        dense_goal_source = "repeat_source_goals"
+    else:
+        dense_goal_steps = min(int(dense_goal_ref.shape[0]), int(source_steps * substeps))
+        dense_goals = dense_goal_ref[:dense_goal_steps]
+        dense_goal_source = "external_dense_goals"
+    effective_alignment_target_mode = "dense" if dense_target_q_ref is not None else str(alignment_target_mode)
     sim_config = rollout_config or make_allegro_rollout_config(dataset_timestep=dt, alignment=alignment)
     sim_config = replace(sim_config, mode="action", dataset_timestep=dt, simulation_timestep=control_dt)
     environment = environment_name or rp1m.canonicalize_environment_name(song_key)
@@ -226,11 +272,17 @@ def rollout_loaded_policy_with_allegro(
                 physics,
                 effective_config.hand_anchor_y_offset,
             )
-        qpos_restored = rp1m._set_hand_qpos(task, physics, q_ref[0])
-        initial_qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(q_ref, 0, dt)
-        qvel_restored = rp1m._set_hand_qvel(task, physics, initial_qvel)
-        if hasattr(physics, "forward"):
-            physics.forward()
+        initial_target_q = dense_target_q_ref[0] if dense_target_q_ref is not None else q_ref[0]
+        if effective_config.restore_initial_hand:
+            qpos_restored = rp1m._set_hand_qpos(task, physics, initial_target_q)
+            if effective_config.set_hand_qvel:
+                if dense_target_qvel_ref is not None and dense_target_qvel_ref.shape[0] > 0:
+                    initial_qvel = float(effective_config.initial_hand_qvel_scale) * dense_target_qvel_ref[0]
+                else:
+                    initial_qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(q_ref, 0, dt)
+                qvel_restored = rp1m._set_hand_qvel(task, physics, initial_qvel)
+            if hasattr(physics, "forward"):
+                physics.forward()
         current_q = rp1m._capture_hand_qpos(task, physics)
         if current_q is None:
             current_q = q_ref[0].copy()
@@ -242,7 +294,8 @@ def rollout_loaded_policy_with_allegro(
                 f"Checkpoint action_dim={policy.checkpoint['action_dim']} does not match "
                 f"environment action_dim={action_spec.shape[0]}"
             )
-        control_overrides = rp1m._initial_wrist_control_overrides(q_ref[0], action_spec, effective_config)
+        wrist_qpos = initial_target_q if effective_config.restore_initial_hand else current_q
+        control_overrides = rp1m._initial_wrist_control_overrides(wrist_qpos, action_spec, effective_config)
         aligner = AllegroAligner(
             config=alignment,
             q_dim=int(current_q.size),
@@ -294,9 +347,17 @@ def rollout_loaded_policy_with_allegro(
                 and source_t % int(effective_config.hand_resync_interval) == 0
             ):
                 task, physics, _piano = rp1m._locate_task_physics_piano(env)
-                qpos_restored = rp1m._set_hand_qpos(task, physics, q_ref[source_t])
+                resync_target_q = q_ref[source_t]
+                if dense_target_q_ref is not None:
+                    resync_target_q = dense_target_q_ref[min(source_t * substeps, dense_target_q_ref.shape[0] - 1)]
+                qpos_restored = rp1m._set_hand_qpos(task, physics, resync_target_q)
                 hand_resync_count += 1
-                qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(q_ref, source_t, dt)
+                if dense_target_qvel_ref is not None and dense_target_qvel_ref.shape[0] > 0:
+                    qvel = float(effective_config.initial_hand_qvel_scale) * dense_target_qvel_ref[
+                        min(source_t * substeps, dense_target_qvel_ref.shape[0] - 1)
+                    ]
+                else:
+                    qvel = float(effective_config.initial_hand_qvel_scale) * _qvel_between(q_ref, source_t, dt)
                 qvel_restored = rp1m._set_hand_qvel(task, physics, qvel)
                 if hasattr(physics, "forward"):
                     physics.forward()
@@ -374,7 +435,15 @@ def rollout_loaded_policy_with_allegro(
                     if substep == 0
                     else (current_q - dense_previous_q) / control_dt
                 )
-                if alignment_target_mode == "endpoint":
+                if dense_target_q_ref is not None:
+                    dense_target_index = min(source_t * substeps + substep, dense_target_q_ref.shape[0] - 1)
+                    target_q = dense_target_q_ref[dense_target_index]
+                    if dense_target_qvel_ref is not None and dense_target_qvel_ref.shape[0] > 0:
+                        target_qvel = dense_target_qvel_ref[min(dense_target_index, dense_target_qvel_ref.shape[0] - 1)]
+                    else:
+                        next_index = min(dense_target_index + 1, dense_target_q_ref.shape[0] - 1)
+                        target_qvel = (dense_target_q_ref[next_index] - dense_target_q_ref[dense_target_index]) / control_dt
+                elif alignment_target_mode == "endpoint":
                     target_index = min(source_t + 1, q_ref.shape[0] - 1)
                     target_q = q_ref[target_index]
                     target_qvel = qvel_ref[target_index] if qvel_ref.size else finite_difference_target(
@@ -530,6 +599,7 @@ def rollout_loaded_policy_with_allegro(
         target_hand_joints=q_ref[:source_steps],
         dense_sim_hand_joints=dense_hand_arr,
         dense_target_hand_joints=dense_target_arr,
+        dense_goals=dense_goals[: max(dense_played_arr.shape[0], 1)],
         reference_actions=reference_actions[: max(adjusted_source_arr.shape[0], 1)],
         goals=goals[: max(played_arr.shape[0], 1)],
         reference_piano_states_for_scoring=(
@@ -576,13 +646,18 @@ def rollout_loaded_policy_with_allegro(
             "Fugue predicts one base action at 20 Hz; Allegro executes 200 Hz residual "
             "actions from current RoboPianist hand state and online feedback-error labels."
         ),
-        "alignment_target_mode": str(alignment_target_mode),
+        "alignment_target_mode": str(effective_alignment_target_mode),
+        "requested_alignment_target_mode": str(alignment_target_mode),
         "alignment_target_power": float(alignment_target_power),
         "base_action_source": str(base_action_source),
-        "planner_source": "held_out_rp1m_hand_joints",
+        "planner_source": "held_out_rp1m_hand_joints" if dense_target_q_ref is None else "external_dense_hand_plan",
+        "dense_target_source": None if dense_target_q_ref is None else str(dense_target_source or "external_dense_hand_joints"),
+        "dense_target_steps_available": 0 if dense_target_q_ref is None else int(dense_target_q_ref.shape[0]),
+        "dense_goal_source": dense_goal_source,
+        "dense_goal_steps_available": int(dense_goals.shape[0]),
         "piano_state_policy": "not_restored_or_used_by_simulator",
         "reference_piano_state_policy": "scoring_only" if piano_ref is not None else "not_loaded",
-        "initial_hand_restored": True,
+        "initial_hand_restored": bool(effective_config.restore_initial_hand),
         "qpos_restored_count": int(qpos_restored),
         "qvel_restored_count": int(qvel_restored),
         "source_steps_requested": int(source_steps),
@@ -633,6 +708,11 @@ def rollout_loaded_policy_with_allegro(
         "hand_qpos_l2_vs_next_reference": hand_summary,
         "dense_hand_qpos_l2_vs_target": dense_hand_summary,
         "against_goals": _score_against(goals, played_arr, threshold=float(effective_config.threshold)),
+        "against_dense_goals": _score_against(
+            dense_goals,
+            dense_played_arr,
+            threshold=float(effective_config.threshold),
+        ),
         "against_reference_piano_states": None
         if piano_ref is None
         else _score_against(piano_ref, played_arr, threshold=float(effective_config.threshold)),
