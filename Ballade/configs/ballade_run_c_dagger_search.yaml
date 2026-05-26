@@ -1,0 +1,26 @@
+run_name: run_c_dagger_search
+source_dt: 0.05
+control_dt: 0.005
+iterations: 3
+max_demos: 64
+max_source_steps: 700
+controller:
+  kind: residual_with_search_fallback
+  residual_scale: 0.2
+  hidden_dim: 256
+  hidden_layers: 3
+local_search:
+  enabled: true
+  mode: event_triggered
+  candidate_count: 32
+  horizon_microsteps: 1
+  action_sigma: 0.08
+  reduce_candidate_count_each_iteration: true
+training:
+  epochs: 40
+  batch_size: 2048
+  learning_rate: 0.0002
+  append_recovery_data: true
+evaluation:
+  held_out_demos: 8
+  require_nonzero_events: true

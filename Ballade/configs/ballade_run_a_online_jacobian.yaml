@@ -1,0 +1,27 @@
+run_name: run_a_online_jacobian
+source_dt: 0.05
+control_dt: 0.005
+max_demos: 3
+max_source_steps: 300
+render: false
+controller:
+  kind: online_jacobian
+  ridge: 0.001
+  damping: 0.05
+  max_action_delta: 0.15
+  proportional_gain: 0.25
+local_search:
+  enabled: true
+  mode: event_triggered
+  candidate_count: 16
+  horizon_microsteps: 1
+  action_sigma: 0.08
+weights:
+  keypress: 8.0
+  non_target_keypress: 5.0
+  hand_endpoint_q: 4.0
+  fingertip: 3.0
+  hand_q: 1.0
+  hand_qvel: 0.25
+  action_smoothness: 0.05
+  action_saturation: 0.02

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ballade-online-controller"
+version = "0.1.0"
+description = "Ballade: 200 Hz online path-following controller for RP1M/RoboPianist"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "OpenAI Codex"}]
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.2",
+]
+
+[project.optional-dependencies]
+wave = [
+  "zarr>=2.16,<3",
+  "PyYAML>=6.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["src", "scripts", ".."]
+
+[tool.ruff]
+line-length = 100

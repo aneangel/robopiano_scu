@@ -1,0 +1,27 @@
+run_name: run_b_residual_online_bc
+source_dt: 0.05
+control_dt: 0.005
+max_demos: 20
+max_source_steps: 500
+teacher_data_subdir: teacher_data
+controller:
+  kind: residual_mlp
+  residual_scale: 0.2
+  hidden_dim: 256
+  hidden_layers: 3
+training:
+  epochs: 50
+  batch_size: 2048
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+loss:
+  action_imitation: 1.0
+  residual_size: 0.01
+  action_smoothness: 0.02
+  action_saturation: 0.005
+local_search:
+  enabled: true
+  mode: event_triggered
+  candidate_count: 24
+  horizon_microsteps: 1
+  action_sigma: 0.08
