@@ -609,7 +609,9 @@ class BagatelleKinematics:
 
         # Keyset cache exact-hit short-circuit. If a previous identical-assignment
         # solve produced an acceptable pose, reuse it and skip scipy LM entirely.
+        # On a near-miss, the cached qpos is returned as a warm-start seed for LM.
         cache_key = None
+        warm_start_seed: np.ndarray | None = None
         if cache is not None and cache.mode != "off":
             cache_key = cache.make_key(
                 active_keys=np.asarray(assignments.assigned_keys, dtype=np.int32),
@@ -633,10 +635,15 @@ class BagatelleKinematics:
                     nfev=0,
                     threshold=float(cfg.residual_success_threshold),
                 )
+            if hit_kind == "warm_start" and cached_qpos is not None:
+                warm_start_seed = self.clip_qpos(cached_qpos)
 
         finger_indices = assignments.assigned_finger_indices.astype(np.int64)
         target_positions = assignments.target_positions.astype(np.float32)
-        x0 = self.clip_qpos(previous)
+        # Use the cached warm-start qpos as the LM initial guess when available;
+        # `previous` is still used for the smoothness regularization term inside
+        # the residual function, so we do not corrupt the smoothness objective.
+        x0 = self.clip_qpos(warm_start_seed if warm_start_seed is not None else previous)
 
         fingertip_axis_weights = np.asarray(
             [cfg.ik_key_front_weight, cfg.ik_key_width_weight, cfg.ik_key_height_weight],
