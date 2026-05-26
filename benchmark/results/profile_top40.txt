@@ -1,0 +1,50 @@
+Tue May 26 14:11:18 2026    /Users/aangeles/robopiano/benchmark/results/dense.cprof
+
+         95064245 function calls (94239703 primitive calls) in 131.675 seconds
+
+   Ordered by: cumulative time
+   List reduced from 10420 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+   2282/1    0.028    0.000  131.681  131.681 {built-in method builtins.exec}
+        1    0.000    0.000  131.681  131.681 plan_trajectory.py:1(<module>)
+        1    0.000    0.000  130.716  130.716 plan_trajectory.py:214(main)
+        1    0.001    0.001  130.581  130.581 planner.py:360(plan_target_keys)
+        1    0.003    0.003  126.622  126.622 planner.py:474(plan_target_keys)
+      150    0.006    0.000  126.517    0.843 kinematics.py:585(solve_press_pose)
+      306    0.006    0.000  121.915    0.398 kinematics.py:673(solve_from_seed)
+      306    0.009    0.000  121.707    0.398 least_squares.py:241(least_squares)
+   217202    1.721    0.000  117.640    0.001 kinematics.py:641(residual)
+   222389    0.128    0.000  117.393    0.001 kinematics.py:283(fingertip_positions_for_qpos)
+   222695    3.409    0.000  116.218    0.001 kinematics.py:264(_set_qpos)
+     4584    0.013    0.000  115.654    0.025 least_squares.py:903(jac_wrapped)
+     4584    0.053    0.000  115.641    0.025 _numdiff.py:277(approx_derivative)
+     4584    0.485    0.000  115.380    0.025 _numdiff.py:584(_dense_difference)
+   210864    0.346    0.000  114.888    0.001 _numdiff.py:468(fun_wrapped)
+      306    0.003    0.000  111.831    0.365 trf.py:112(trf)
+      306    0.195    0.001  111.826    0.365 trf.py:205(trf_bounds)
+   223317    0.134    0.000   90.807    0.000 physics.py:510(forward)
+   223317    0.453    0.000   90.673    0.000 engine.py:335(forward)
+   223317   89.049    0.000   89.049    0.000 {built-in method mujoco._functions.mj_forward}
+ 10249124   11.128    0.000   17.936    0.000 physics.py:356(__setattr__)
+      259    0.006    0.000   15.288    0.059 __init__.py:1(<module>)
+ 10248644    2.899    0.000    5.257    0.000 physics.py:286(_get_cached_array_and_index)
+     6338    0.008    0.000    3.843    0.001 least_squares.py:835(fun_wrapped)
+ 10481788    3.791    0.000    3.795    0.000 physics.py:515(bind)
+        1    0.000    0.000    3.593    3.593 kinematics.py:108(__init__)
+  2192/12    0.006    0.000    3.563    0.297 <frozen importlib._bootstrap>:1022(_find_and_load)
+  2185/12    0.005    0.000    3.563    0.297 <frozen importlib._bootstrap>:987(_find_and_load_unlocked)
+  1926/14    0.003    0.000    3.560    0.254 <frozen importlib._bootstrap_external>:877(exec_module)
+  2120/17    0.005    0.000    3.557    0.209 <frozen importlib._bootstrap>:664(_load_unlocked)
+  2876/17    0.001    0.000    3.555    0.209 <frozen importlib._bootstrap>:233(_call_with_frames_removed)
+   880/56    0.001    0.000    3.216    0.057 {built-in method builtins.__import__}
+        1    0.000    0.000    2.797    2.797 rollout.py:235(_load_env)
+ 2237/561    0.002    0.000    2.758    0.005 <frozen importlib._bootstrap>:1053(_handle_fromlist)
+      150    0.042    0.000    2.443    0.016 kinematics.py:398(_ranked_press_pose_initial_seeds)
+ 10248644    1.915    0.000    2.357    0.000 physics.py:275(_get_cached_named_indexer)
+      306    0.001    0.000    2.132    0.007 kinematics.py:700(with_static_contact_metrics)
+      306    0.005    0.000    2.125    0.007 kinematics.py:329(static_contact_metrics)
+      306    0.003    0.000    2.119    0.007 kinematics.py:309(activation_for_qpos)
+   445873    0.493    0.000    1.797    0.000 kinematics.py:271(clip_qpos)
+
+

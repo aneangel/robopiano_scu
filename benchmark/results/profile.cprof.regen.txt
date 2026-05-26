@@ -1,0 +1,1 @@
+Regenerate via: bash benchmark/run_profile.sh (or the inline cProfile command in BENCHMARK_REPORT.md)
