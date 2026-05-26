@@ -1,4 +1,4 @@
-# rp1m_simulato
+# rp1m_simulator
 
 `rp1m_simulator` replays RP1M demonstrations through RoboPianist without loading
 RP1M piano states into the simulator. Piano states, when present in `rp1m.zarr`,
@@ -27,7 +27,7 @@ cd /WAVE/projects/ECEN-524-Wi26/robopiano
 conda activate sonata
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-export RP1M_ROOT=/WAVE/datasets/ccoelho_lab-jlanders/rp1m.zar
+export RP1M_ROOT=/WAVE/datasets/ccoelho_lab-jlanders/rp1m.zarr
 export SONG_KEY=<rp1m_song_key>
 export DEMO_ID=<demo_id>
 export RUN_NAME=rp1m_action_only_$(date +%Y%m%d_%H%M%S)
@@ -53,9 +53,88 @@ For action-only RP1M reconstruction:
   restore recorded RP1M hand joints.
 - Treat `piano_states` as scoring-only data. They must never be restored into
   the simulator.
-- The one permitted hand-state-derived calibration is the startup hand-ancho
+- The one permitted hand-state-derived calibration is the startup hand-anchor
   offset. Keep the default auto-calibration when reproducing the current RP1M
   results; disable it only for a strict no-anchor ablation.
+
+## Most Important Run: Dense 200 Hz Controller Input
+
+If the controller already emits actions at 200 Hz, run those actions as 200 Hz
+source inputs. Do not use RP1M zero padding, and do not label a 20 Hz RP1M action
+array as 200 Hz. The source timestep and simulator timestep should both be 5 ms:
+
+```text
+dataset_timestep = 0.005
+simulation_timestep = 0.005
+substeps_per_source_step = 1
+```
+
+With one source action per simulator step, `--action-substep-policy repeat` is
+the clearest no-padding setting: there are no extra substeps to repeat across,
+and no zero-padded slots are created.
+
+For a command-line run, the input Zarr must contain dense 200 Hz actions, goals,
+and scoring references at the same source rate:
+
+```bash
+python -m rp1m_simulator rollout \
+  --rp1m-root "$DENSE_200HZ_ROOT" \
+  --song-key "$SONG_KEY" \
+  --demo-id "$DEMO_ID" \
+  --output-dir "$OUTPUT_ROOT/action_200hz_dense_controller" \
+  --mode action \
+  --dataset-timestep 0.005 \
+  --simulation-timestep 0.005 \
+  --action-source-scale normalized_minus_one_to_one \
+  --action-substep-policy repeat \
+  --wrist-action-policy hold_initial \
+  --no-restore-initial-hand \
+  --no-set-hand-qvel
+```
+
+For generated actions that are not stored in Zarr, call the simulator API with a
+trajectory whose arrays are already dense at 200 Hz. `actions`, `goals`, and
+`hand_joints` must all have 200 Hz source rows because rollout length is bounded
+by the shortest source array. In action mode those hand joints are not restored
+when `restore_initial_hand=False`; they only support anchor calibration and
+summary comparison.
+
+```python
+from pathlib import Path
+
+from rp1m_simulator.simulator import (
+    RolloutConfig,
+    make_rp1m_trajectory_from_arrays,
+    simulate_rp1m_rollout,
+)
+
+trajectory = make_rp1m_trajectory_from_arrays(
+    song_key=song_key,
+    environment_name=environment_name,
+    demo_id=demo_id,
+    actions=actions_200hz,          # [T_200hz, 39]
+    goals=goals_200hz,              # [T_200hz, 89] or at least [:, :88]
+    hand_joints=hand_joints_200hz,  # [T_200hz, 46], not restored in action mode
+    reference_piano_states=reference_piano_states_200hz,
+)
+
+config = RolloutConfig(
+    mode="action",
+    dataset_timestep=0.005,
+    simulation_timestep=0.005,
+    action_source_scale="normalized_minus_one_to_one",
+    action_substep_policy="repeat",
+    wrist_action_policy="hold_initial",
+    restore_initial_hand=False,
+    set_hand_qvel=False,
+)
+
+simulate_rp1m_rollout(trajectory, config, Path(output_dir))
+```
+
+This is the preferred path for a true 200 Hz controller. The RP1M zero-padding
+path below exists only for replaying RP1M's native 20 Hz action stream inside a
+200 Hz simulator loop.
 
 ## RP1M 20 Hz Actions At 200 Hz Control
 
@@ -116,11 +195,11 @@ path.
 
 ## Verify No State Leakage
 
-After either run, inspect `summary.json`. These checks should pass for a valid
-action-only rollout:
+After any action-only run, inspect `summary.json`. These checks should pass
+for a valid action-only rollout:
 
 ```bash
-python - "$OUTPUT_ROOT/action_200hz_zero_pad_hold" <<'PY'
+python - "$OUTPUT_ROOT/action_200hz_dense_controller" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -130,6 +209,10 @@ checks = {
     "mode_is_action": summary["mode"] == "action",
     "compressed_39d_actions": summary["runtime_policy"]["action_input_format"] == "compressed_39d",
     "default_initial_hand": summary["initial_hand_policy"]["state_source"] == "robopianist_reset_default",
+    "same_source_and_control_rate_or_zero_pad": (
+        summary["substeps_per_source_step"] == 1
+        or summary["effective_config"]["action_substep_policy"] == "zero_pad_hold"
+    ),
     "no_initial_qpos_restore": summary["qpos_restored_count"] == 0,
     "no_initial_qvel_restore": summary["qvel_restored_count"] == 0,
     "no_hand_resync": not summary["hand_resync_policy"]["uses_rp1m_hand_joints"],
@@ -144,9 +227,10 @@ print("action_substep_policy =", summary["effective_config"]["action_substep_pol
 PY
 ```
 
-For the source-rate run, replace the path with
-`$OUTPUT_ROOT/action_20hz_source_rate`. A successful RP1M action-only
-reconstruction should make `against_goals.key_f1` track the recorded-reference
-F1 closely without any hand-state or piano-state leakage. If it does not, debug
-action timing, action scaling, and action mapping before using hand-state rollout
-as a comparison.
+For the RP1M zero-pad and source-rate runs, replace the path with
+`$OUTPUT_ROOT/action_200hz_zero_pad_hold` or
+`$OUTPUT_ROOT/action_20hz_source_rate`. A successful action-only reconstruction
+should make `against_goals.key_f1` track the recorded-reference F1 closely
+without any hand-state or piano-state leakage. If it does not, debug action
+timing, action scaling, and action mapping before using hand-state rollout as a
+comparison.
