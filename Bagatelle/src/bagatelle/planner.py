@@ -643,9 +643,31 @@ def plan_target_keys(
                         best_assignment = replace(assignment, candidate_rank=int(candidate.rank), candidate_score=float(score))
                         best_result = result
                 if best_assignment is None or best_result is None:
-                    raise RuntimeError("generate_assignment_candidates returned no usable candidate")
-                assignment = best_assignment
-                result = best_result
+                    # Fallback: scoring loop produced no comparable candidate
+                    # (every score was nan/inf, typically a hard polyphonic
+                    # waypoint where assignment cost overflowed). Take the
+                    # first candidate's solve unconditionally so the whole
+                    # song doesn't crash from one bad waypoint.
+                    fallback = candidates[0]
+                    assignment = replace(fallback.result,
+                                          candidate_rank=int(fallback.rank),
+                                          candidate_score=float("nan"))
+                    press_targets = kin.key_press_targets(active_keys)
+                    if assignment.count:
+                        assignment = replace(
+                            assignment,
+                            target_positions=press_targets[assignment.assigned_key_positions].astype(np.float32),
+                        )
+                    result = kin.solve_press_pose(
+                        assignment,
+                        previous_qpos,
+                        neutral_qpos=neutral_qpos,
+                        config=candidate_scoring_cfg,
+                        cache=keyset_cache,
+                    )
+                else:
+                    assignment = best_assignment
+                    result = best_result
                 if candidate_scoring_cfg is not cfg and assignment.count:
                     result = kin.solve_press_pose(
                         assignment,
