@@ -30,6 +30,7 @@ import statistics
 import subprocess
 import sys
 import time
+import multiprocessing as _mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -557,7 +558,11 @@ def main() -> int:
     wall_t0 = time.perf_counter()
 
     if pending:
-        with ProcessPoolExecutor(max_workers=max(1, int(args.parallelism))) as pool:
+        # Use 'spawn' start method so the pool does not inherit half-initialized
+        # MuJoCo/EGL state on Linux (the default 'fork' causes 16-way workers to
+        # hang on the RTX 5080 server). Matches macOS default behaviour.
+        _ctx = _mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=max(1, int(args.parallelism)), mp_context=_ctx) as pool:
             future_to_entry = {}
             for entry in pending:
                 fut = pool.submit(
