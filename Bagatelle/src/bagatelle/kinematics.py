@@ -172,6 +172,26 @@ class BagatelleKinematics:
         self.joint_lower = bounds[:, 0].astype(np.float32)
         self.joint_upper = bounds[:, 1].astype(np.float32)
         self._repair_bounds()
+        # Vectorized qpos write path: precompute the qpos indices for the 46
+        # reduced hand joints. _set_qpos then becomes one numpy slice write
+        # plus one physics.forward(), instead of 46 dm_control bind() calls.
+        # Same pattern as Bagatelle/scripts/debug_verify_ik_teleport.py:103-119.
+        try:
+            _joint_ids = np.asarray(
+                self.physics.bind(self.joint_handles).element_id, dtype=np.int64
+            )
+            _qpos_indices = np.asarray(
+                self.physics.model.jnt_qposadr, dtype=np.int64
+            )[_joint_ids]
+            if (
+                _qpos_indices.shape == (HAND_STATE_DIM,)
+                and np.unique(_qpos_indices).size == HAND_STATE_DIM
+            ):
+                self._joint_qpos_indices: np.ndarray | None = _qpos_indices
+            else:
+                self._joint_qpos_indices = None  # fall back to per-joint write
+        except Exception:
+            self._joint_qpos_indices = None
         self.neutral_qpos = self.current_qpos()
         self.neutral_fingertips = self.current_fingertips()
         self._rhapsody_solver = None
@@ -263,6 +283,13 @@ class BagatelleKinematics:
 
     def _set_qpos(self, qpos: np.ndarray) -> None:
         values = self.clip_qpos(qpos)
+        if self._joint_qpos_indices is not None:
+            # Vectorized fast path: one np slice write + one MuJoCo forward.
+            # Eliminates ~10M dm_control bind/setattr calls per planning run.
+            self.physics.data.qpos[self._joint_qpos_indices] = values.astype(np.float64)
+            self.physics.forward()
+            return
+        # Fallback (only if index resolution failed): per-joint bind write.
         for joint, value in zip(self.joint_handles, values):
             self.physics.bind(joint).qpos = float(value)
         if hasattr(self.physics, "forward"):
