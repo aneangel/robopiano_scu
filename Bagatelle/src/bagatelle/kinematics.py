@@ -771,20 +771,78 @@ class BagatelleKinematics:
                 parts.append(avoid_error.reshape(-1) * wrong_key_weight)
             return np.concatenate(parts, axis=0).astype(np.float64)
 
-        # Analytical Jacobian path. Enabled when the residual contains only
-        # the three terms with closed-form gradients (fingertip / smoothness /
-        # neutral) and the kinematics object can build the fingertip Jacobian
-        # via mj_jacSite. Falls back to scipy's finite-difference jac when
-        # any nonlinear term (clearance / avoid_mispresses / wrong_key) is
-        # active or the mj_jac plumbing is unavailable.
+        # Analytical Jacobian path. Always-on terms (fingertip / smoothness /
+        # neutral) are computed analytically via mj_jacSite + identity blocks.
+        # Optional avoid_mispresses term has a piecewise-smooth Jacobian we
+        # also handle. inactive_fingertip_clearance and wrong_key_xy terms
+        # are not yet supported; if either is on, we fall back to scipy FD.
+        analytic_avoid_mispresses_active = (
+            unassigned_strategy == "avoid_mispresses"
+            and inactive_avoidance_weight > 0.0
+            and inactive_indices.size > 0
+            and wrong_key_targets.size > 0
+        )
         analytic_jac_enabled = (
             bool(getattr(cfg, "ik_analytical_jacobian", True))
             and inactive_clearance_weight == 0.0
-            and not (unassigned_strategy == "avoid_mispresses" and inactive_avoidance_weight > 0.0)
             and wrong_key_weight == 0.0
             and self._joint_dof_indices is not None
             and self._fingertip_site_ids is not None
         )
+        # Stash inactive XY-targets in float64 for the Jacobian closure
+        _avoid_targets_xy = (
+            np.asarray(wrong_key_targets[:, :2], dtype=np.float64)
+            if analytic_avoid_mispresses_active
+            else None
+        )
+        _avoid_radius = float(max(inactive_avoidance_radius, 1e-6))
+        _avoid_clearance_z = float(clearance_z)
+        _avoid_weight = float(inactive_avoidance_weight)
+
+        def _avoid_mispresses_jacobian(fingertips_all: np.ndarray) -> np.ndarray:
+            """Return d(inactive_avoid_residual)/d(q), shape (n_inactive*n_wrong, 46).
+
+            The residual per (inactive_finger i, wrong_key k) is
+                r_{i,k} = (proximity_{i,k}) * (vertical_deficit_i) * weight
+            where
+                proximity_{i,k} = max(1 - xy_dist / radius, 0)
+                vertical_deficit_i = max(clearance_z - fp_z_i, 0)
+            We use the subgradient: zero at the kinks.
+            """
+            inactive_jac_all = self.fingertip_jacobian(inactive_indices)
+            if inactive_jac_all is None:
+                raise RuntimeError("fingertip_jacobian returned None for inactive fingers")
+            fp_inactive = fingertips_all[inactive_indices].astype(np.float64)
+            assert _avoid_targets_xy is not None
+            diff_xy = fp_inactive[:, None, :2] - _avoid_targets_xy[None, :, :2]
+            xy_dist = np.linalg.norm(diff_xy, axis=2) + 1e-12  # avoid /0 at exact overlap
+            proximity = np.maximum(1.0 - xy_dist / _avoid_radius, 0.0)
+            vertical_deficit = np.maximum(_avoid_clearance_z - fp_inactive[:, 2], 0.0)
+            # Active-mask: which (i, k) pairs have nonzero proximity AND
+            # nonzero vertical deficit; subgradient zero elsewhere
+            prox_active = (proximity > 0.0).astype(np.float64)
+            vert_active = (vertical_deficit > 0.0).astype(np.float64)
+            n_inactive = inactive_indices.size
+            n_wrong = _avoid_targets_xy.shape[0]
+            # d(xy_dist)/dq_j = (diff_xy . dfp_xy/dq) / xy_dist
+            # inactive_jac_all shape: (n_inactive, 3, 46)
+            # for each (i, k): d(prox)/dq_j = -prox_active * (diff_xy_ik . dfp_xy_i/dq_j) / (radius * xy_dist_ik)
+            dfp_xy = inactive_jac_all[:, :2, :]  # (n_inactive, 2, 46)
+            # diff_xy: (n_inactive, n_wrong, 2)
+            d_xy_dist = np.einsum("ikd,idj->ikj", diff_xy, dfp_xy) / xy_dist[:, :, None]
+            d_proximity = -prox_active[:, :, None] * d_xy_dist / _avoid_radius
+            # d(vertical_deficit)/dq_j = -vert_active * d(fp_z)/dq_j
+            dfp_z = inactive_jac_all[:, 2, :]  # (n_inactive, 46)
+            d_vertical = -vert_active[:, None] * dfp_z  # (n_inactive, 46)
+            # residual r_{i,k} = proximity * vertical_deficit, chain rule:
+            # dr/dq = d(prox) * vd + prox * d(vd)
+            jac = (
+                d_proximity * vertical_deficit[:, None, None]
+                + proximity[:, :, None] * d_vertical[:, None, :]
+            )
+            # Shape (n_inactive, n_wrong, 46) → flatten to match residual order
+            # (which is .reshape(-1) of inactive_error before *weight)
+            return jac.reshape(n_inactive * n_wrong, HAND_STATE_DIM) * _avoid_weight
 
         def jacobian(values: np.ndarray) -> np.ndarray:
             # Place physics at the requested q so mj_jacSite reads xpos/xfrc
@@ -799,7 +857,11 @@ class BagatelleKinematics:
             jac_fingertip = weighted.reshape(-1, HAND_STATE_DIM) * float(cfg.ik_fingertip_weight)
             jac_smooth = np.eye(HAND_STATE_DIM, dtype=np.float64) * float(cfg.ik_smoothness_weight)
             jac_neutral = np.eye(HAND_STATE_DIM, dtype=np.float64) * float(cfg.ik_neutral_weight)
-            return np.concatenate([jac_fingertip, jac_smooth, jac_neutral], axis=0)
+            parts_jac = [jac_fingertip, jac_smooth, jac_neutral]
+            if analytic_avoid_mispresses_active:
+                fingertips_all = self.current_fingertips()
+                parts_jac.append(_avoid_mispresses_jacobian(fingertips_all))
+            return np.concatenate(parts_jac, axis=0)
 
         _ls_kwargs: dict = {}
         if analytic_jac_enabled:
