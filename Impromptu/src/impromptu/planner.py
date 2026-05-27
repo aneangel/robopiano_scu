@@ -557,6 +557,14 @@ def plan_target_keys(
         metadata["bagatelle_config"] = bagatelle_plan.metadata.get("config", bag_cfg.to_dict())
         if "keyset_cache_report" in bagatelle_plan.metadata:
             metadata["keyset_cache_report"] = bagatelle_plan.metadata["keyset_cache_report"]
+        for _static_key in (
+            "static_contact_hits_total",
+            "static_contact_wrongs_total",
+            "static_contact_misses_total",
+            "static_contact_played_total",
+        ):
+            if _static_key in bagatelle_plan.metadata:
+                metadata[_static_key] = bagatelle_plan.metadata[_static_key]
         metadata["trajectory_mode"] = trajectory_mode
         metadata["assignment_source"] = "Bagatelle.plan_target_keys"
         if trajectory_mode == TRAJECTORY_MODE_JOINT_SPACE_STRAIGHTEN:

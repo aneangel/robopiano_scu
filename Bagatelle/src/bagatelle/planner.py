@@ -363,6 +363,21 @@ def _metadata_from_results(
 ) -> dict[str, Any]:
     max_residuals = np.asarray([result.max_residual for result in ik_results], dtype=np.float32)
     unassigned_total = int(sum(int(result.unassigned_keys.size) for result in ik_results))
+    # Aggregate per-waypoint static-contact counts into top-level totals so
+    # downstream tooling (and the A/B harness) can compute static-contact F1
+    # without parsing waypoint_results entry by entry.
+    static_contact_hits_total = int(
+        sum(int(getattr(result, "contact_target_hit_count", 0)) for result in ik_results)
+    )
+    static_contact_wrongs_total = int(
+        sum(int(getattr(result, "contact_wrong_key_count", 0)) for result in ik_results)
+    )
+    static_contact_misses_total = int(
+        sum(int(getattr(result, "contact_missed_key_count", 0)) for result in ik_results)
+    )
+    static_contact_played_total = int(
+        sum(int(getattr(result, "contact_played_key_count", 0)) for result in ik_results)
+    )
     site_names = list(getattr(kinematics, "fingertip_site_names", ()))
     joint_names = list(getattr(kinematics, "joint_names", ()))
     order_metadata = getattr(kinematics, "order_metadata", {}) or {}
@@ -420,6 +435,10 @@ def _metadata_from_results(
         "ik_unassigned_key_count": unassigned_total,
         "ik_max_residual_mean": float(max_residuals.mean()) if max_residuals.size else 0.0,
         "ik_max_residual_p95": float(np.percentile(max_residuals, 95)) if max_residuals.size else 0.0,
+        "static_contact_hits_total": static_contact_hits_total,
+        "static_contact_wrongs_total": static_contact_wrongs_total,
+        "static_contact_misses_total": static_contact_misses_total,
+        "static_contact_played_total": static_contact_played_total,
         "environment_name": str(getattr(kinematics, "environment_name", "")),
         "midi_proto_path": str(getattr(kinematics, "midi_proto_path", "")),
         "load_info": getattr(kinematics, "load_info", {}),
