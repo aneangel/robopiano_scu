@@ -159,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-static-contact-residual-weight", type=float, default=10.0)
     parser.add_argument("--ik-static-contact-failure-weight", type=float, default=25.0)
     parser.add_argument(
+        "--disable-ik-contact-perfect-early-exit",
+        action="store_true",
+        help="Disable the contact-perfect first-solve early-exit. Useful for A/B baseline parity.",
+    )
+    parser.add_argument(
         "--ik-cache-mode",
         choices=("off", "exact_only", "exact_and_warm_start"),
         default="off",
@@ -335,6 +340,7 @@ def main() -> None:
         ik_static_contact_missed_key_weight=float(args.ik_static_contact_missed_key_weight),
         ik_static_contact_residual_weight=float(args.ik_static_contact_residual_weight),
         ik_static_contact_failure_weight=float(args.ik_static_contact_failure_weight),
+        ik_contact_perfect_early_exit=not bool(args.disable_ik_contact_perfect_early_exit),
         ik_cache_mode=str(args.ik_cache_mode),
         ik_cache_jaccard_threshold=float(args.ik_cache_jaccard_threshold),
         rhapsody_ik_enabled=bool(args.enable_rhapsody_ik),

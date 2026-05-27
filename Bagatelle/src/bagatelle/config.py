@@ -45,6 +45,12 @@ class BagatelleConfig:
     ik_static_contact_missed_key_weight: float = 2.0
     ik_static_contact_residual_weight: float = 10.0
     ik_static_contact_failure_weight: float = 25.0
+    # When the first IK seed already produces a pose with success=True, zero
+    # missed keys, and zero wrong-key contacts, skip multistart's extra seeds.
+    # No quality regression by construction: extra seeds are ranked under
+    # contact_rank, and a contact-perfect first solve already sits at the
+    # rank floor (missed=wrong=0, max_residual <= threshold).
+    ik_contact_perfect_early_exit: bool = True
 
     # Per-song keyset fingerprint cache for IK short-circuiting.
     # off               : no cache, baseline behavior

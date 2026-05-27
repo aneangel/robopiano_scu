@@ -778,6 +778,25 @@ class BagatelleKinematics:
         try:
             result = with_static_contact_metrics(solve_from_seed(x0, seed_index=0))
             best = result
+            # Contact-perfect early exit: when the first solve already lands every
+            # active fingertip on its target key with no wrong-key contacts and
+            # converges by L2 residual, no extra seed in multistart can beat it
+            # under contact_rank (which is bounded below by these counters).
+            # This collapses multistart's 2+ LM solves per waypoint to 1 when
+            # the first seed is good enough.
+            contact_perfect_early_exit = bool(
+                getattr(cfg, "ik_contact_perfect_early_exit", True)
+            )
+            if (
+                contact_perfect_early_exit
+                and validate_static_contacts
+                and bool(result.success)
+                and int(getattr(result, "contact_missed_key_count", 0)) == 0
+                and int(getattr(result, "contact_wrong_key_count", 0)) == 0
+            ):
+                if cache is not None and cache_key is not None:
+                    cache.insert(cache_key, result.pose, float(result.residual_norm))
+                return result
             rhapsody_seed = self._rhapsody_press_pose_seed(assignments, previous, cfg)
             try_extra_seeds = bool(validate_static_contacts) or (
                 not bool(result.success) and bool(getattr(cfg, "ik_multistart_on_failure", True))
