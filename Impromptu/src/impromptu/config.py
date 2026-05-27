@@ -118,6 +118,7 @@ class ImpromptuConfig:
     ik_static_contact_missed_key_weight: float = 2.0
     ik_static_contact_residual_weight: float = 10.0
     ik_static_contact_failure_weight: float = 25.0
+    ik_analytical_jacobian: bool = True
     ik_contact_perfect_early_exit: bool = True
     ik_cache_mode: str = "off"
     ik_cache_jaccard_threshold: float = 0.8

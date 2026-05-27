@@ -45,6 +45,13 @@ class BagatelleConfig:
     ik_static_contact_missed_key_weight: float = 2.0
     ik_static_contact_residual_weight: float = 10.0
     ik_static_contact_failure_weight: float = 25.0
+    # Use an analytical Jacobian for the IK residual instead of scipy's
+    # finite-difference default. Cuts MuJoCo FK calls by ~9x per LM iteration
+    # (was 46 perturb evals plus 1 fwd eval; now 1 fwd eval + mj_jacSite).
+    # Only takes effect when the residual contains no nonlinear terms beyond
+    # fingertip / smoothness / neutral (the dense smoke and recovery configs).
+    ik_analytical_jacobian: bool = True
+
     # When the first IK seed already produces a pose with success=True, zero
     # missed keys, and zero wrong-key contacts, skip multistart's extra seeds.
     # No quality regression by construction: extra seeds are ranked under

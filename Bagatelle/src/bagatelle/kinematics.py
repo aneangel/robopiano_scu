@@ -176,6 +176,9 @@ class BagatelleKinematics:
         # reduced hand joints. _set_qpos then becomes one numpy slice write
         # plus one physics.forward(), instead of 46 dm_control bind() calls.
         # Same pattern as Bagatelle/scripts/debug_verify_ik_teleport.py:103-119.
+        self._joint_qpos_indices: np.ndarray | None = None
+        self._joint_dof_indices: np.ndarray | None = None
+        self._fingertip_site_ids: np.ndarray | None = None
         try:
             _joint_ids = np.asarray(
                 self.physics.bind(self.joint_handles).element_id, dtype=np.int64
@@ -183,15 +186,23 @@ class BagatelleKinematics:
             _qpos_indices = np.asarray(
                 self.physics.model.jnt_qposadr, dtype=np.int64
             )[_joint_ids]
+            _dof_indices = np.asarray(
+                self.physics.model.jnt_dofadr, dtype=np.int64
+            )[_joint_ids]
             if (
                 _qpos_indices.shape == (HAND_STATE_DIM,)
                 and np.unique(_qpos_indices).size == HAND_STATE_DIM
+                and _dof_indices.shape == (HAND_STATE_DIM,)
+                and np.unique(_dof_indices).size == HAND_STATE_DIM
             ):
-                self._joint_qpos_indices: np.ndarray | None = _qpos_indices
-            else:
-                self._joint_qpos_indices = None  # fall back to per-joint write
+                self._joint_qpos_indices = _qpos_indices
+                self._joint_dof_indices = _dof_indices
+            # Fingertip site ids for mj_jacSite (analytical Jacobian path).
+            self._fingertip_site_ids = np.asarray(
+                self.physics.bind(self.fingertip_sites).element_id, dtype=np.int64
+            )
         except Exception:
-            self._joint_qpos_indices = None
+            pass
         self.neutral_qpos = self.current_qpos()
         self.neutral_fingertips = self.current_fingertips()
         self._rhapsody_solver = None
@@ -306,6 +317,34 @@ class BagatelleKinematics:
         if positions.shape != (NUM_FINGERS, 3):
             raise RuntimeError(f"Expected fingertip positions [10, 3], got {positions.shape}")
         return np.ascontiguousarray(positions, dtype=np.float32)
+
+    def fingertip_jacobian(self, finger_indices: np.ndarray) -> np.ndarray | None:
+        """Return d(fingertip_xyz)/d(hand_qpos) shape (n_fingers, 3, 46) via mj_jacSite.
+
+        Requires _fingertip_site_ids and _joint_dof_indices to be populated, and
+        the physics state must already be at the qpos for which the Jacobian is
+        requested (call _set_qpos / forward before invoking).
+
+        Returns None if the cached indices are unavailable; callers should
+        fall back to finite-difference Jacobian.
+        """
+        if self._fingertip_site_ids is None or self._joint_dof_indices is None:
+            return None
+        try:
+            import mujoco  # type: ignore
+        except Exception:
+            return None
+        model = self.physics.model.ptr
+        data = self.physics.data.ptr
+        nv = int(self.physics.model.nv)
+        finger_ids = np.asarray(finger_indices, dtype=np.int64).reshape(-1)
+        out = np.zeros((finger_ids.size, 3, HAND_STATE_DIM), dtype=np.float64)
+        jacp = np.zeros((3, nv), dtype=np.float64)
+        for row, finger_idx in enumerate(finger_ids):
+            site_id = int(self._fingertip_site_ids[int(finger_idx)])
+            mujoco.mj_jacSite(model, data, jacp, None, site_id)
+            out[row] = jacp[:, self._joint_dof_indices]
+        return out
 
     def fingertip_positions_for_qpos(self, qpos: np.ndarray) -> np.ndarray:
         self._set_qpos(qpos)
@@ -732,6 +771,40 @@ class BagatelleKinematics:
                 parts.append(avoid_error.reshape(-1) * wrong_key_weight)
             return np.concatenate(parts, axis=0).astype(np.float64)
 
+        # Analytical Jacobian path. Enabled when the residual contains only
+        # the three terms with closed-form gradients (fingertip / smoothness /
+        # neutral) and the kinematics object can build the fingertip Jacobian
+        # via mj_jacSite. Falls back to scipy's finite-difference jac when
+        # any nonlinear term (clearance / avoid_mispresses / wrong_key) is
+        # active or the mj_jac plumbing is unavailable.
+        analytic_jac_enabled = (
+            bool(getattr(cfg, "ik_analytical_jacobian", True))
+            and inactive_clearance_weight == 0.0
+            and not (unassigned_strategy == "avoid_mispresses" and inactive_avoidance_weight > 0.0)
+            and wrong_key_weight == 0.0
+            and self._joint_dof_indices is not None
+            and self._fingertip_site_ids is not None
+        )
+
+        def jacobian(values: np.ndarray) -> np.ndarray:
+            # Place physics at the requested q so mj_jacSite reads xpos/xfrc
+            # consistent with the residual evaluation.
+            q = self.clip_qpos(values)
+            self._set_qpos(q)
+            fingertip_jac = self.fingertip_jacobian(finger_indices)
+            if fingertip_jac is None:
+                raise RuntimeError("fingertip_jacobian returned None despite analytic gate")
+            # Weighted fingertip term: shape (n_active * 3, HAND_STATE_DIM)
+            weighted = fingertip_jac * fingertip_axis_weights[None, :, None]
+            jac_fingertip = weighted.reshape(-1, HAND_STATE_DIM) * float(cfg.ik_fingertip_weight)
+            jac_smooth = np.eye(HAND_STATE_DIM, dtype=np.float64) * float(cfg.ik_smoothness_weight)
+            jac_neutral = np.eye(HAND_STATE_DIM, dtype=np.float64) * float(cfg.ik_neutral_weight)
+            return np.concatenate([jac_fingertip, jac_smooth, jac_neutral], axis=0)
+
+        _ls_kwargs: dict = {}
+        if analytic_jac_enabled:
+            _ls_kwargs["jac"] = jacobian
+
         def solve_from_seed(seed: np.ndarray, *, seed_index: int) -> IKResult:
             opt = least_squares(
                 residual,
@@ -741,6 +814,7 @@ class BagatelleKinematics:
                 ftol=float(cfg.ik_ftol),
                 xtol=float(cfg.ik_xtol),
                 gtol=float(cfg.ik_gtol),
+                **_ls_kwargs,
             )
             pose = self.clip_qpos(opt.x)
             fingertips = self.fingertip_positions_for_qpos(pose)

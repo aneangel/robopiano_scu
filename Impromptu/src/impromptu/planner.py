@@ -69,6 +69,7 @@ def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
         ik_static_contact_missed_key_weight=float(config.ik_static_contact_missed_key_weight),
         ik_static_contact_residual_weight=float(config.ik_static_contact_residual_weight),
         ik_static_contact_failure_weight=float(config.ik_static_contact_failure_weight),
+        ik_analytical_jacobian=bool(getattr(config, "ik_analytical_jacobian", True)),
         ik_contact_perfect_early_exit=bool(getattr(config, "ik_contact_perfect_early_exit", True)),
         ik_cache_mode=str(getattr(config, "ik_cache_mode", "off")),
         ik_cache_jaccard_threshold=float(getattr(config, "ik_cache_jaccard_threshold", 0.8)),
