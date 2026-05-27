@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-reach-soft-limit", type=float, default=0.20)
     parser.add_argument("--assignment-top-k", type=int, default=1)
     parser.add_argument("--assignment-top-k-extra-penalty", type=float, default=1e-4)
+    parser.add_argument("--assignment-lookahead-steps", type=int, default=0)
+    parser.add_argument("--assignment-lookahead-weight", type=float, default=1.0)
     parser.add_argument("--assignment-beam-width", type=int, default=4)
     parser.add_argument("--assignment-candidates-per-step", type=int, default=0)
     parser.add_argument("--assignment-fail-if-unassigned", action="store_true")
@@ -308,6 +310,8 @@ def main() -> None:
         assignment_middle_key=int(args.assignment_middle_key),
         assignment_reach_soft_limit=float(args.assignment_reach_soft_limit),
         assignment_top_k=int(args.assignment_top_k),
+        assignment_lookahead_steps=int(args.assignment_lookahead_steps),
+        assignment_lookahead_weight=float(args.assignment_lookahead_weight),
         assignment_top_k_extra_penalty=float(args.assignment_top_k_extra_penalty),
         assignment_beam_width=int(args.assignment_beam_width),
         assignment_candidates_per_step=int(args.assignment_candidates_per_step),

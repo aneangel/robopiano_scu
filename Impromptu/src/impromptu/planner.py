@@ -112,6 +112,8 @@ def _bagatelle_config(config: ImpromptuConfig) -> BagatelleConfig:
         assignment_reach_soft_limit=float(config.assignment_reach_soft_limit),
         assignment_top_k=int(config.assignment_top_k),
         assignment_top_k_extra_penalty=float(config.assignment_top_k_extra_penalty),
+        assignment_lookahead_steps=int(getattr(config, "assignment_lookahead_steps", 0)),
+        assignment_lookahead_weight=float(getattr(config, "assignment_lookahead_weight", 1.0)),
         assignment_beam_width=int(config.assignment_beam_width),
         assignment_candidates_per_step=int(config.assignment_candidates_per_step),
         assignment_fail_if_unassigned=bool(config.assignment_fail_if_unassigned),

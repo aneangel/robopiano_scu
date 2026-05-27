@@ -69,6 +69,7 @@ BASELINE_PLAN_FLAGS: list[str] = [
     "--ik-unassigned-fingertip-strategy", "avoid_mispresses",
     "--ik-unassigned-fingertip-avoidance-weight", "64",
     "--ik-unassigned-fingertip-avoidance-radius", "0.06",
+    "--enable-trajectory-refinement",
 ]
 
 CSV_COLUMNS = [

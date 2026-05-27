@@ -75,6 +75,8 @@ class ImpromptuConfig:
     assignment_reach_soft_limit: float = 0.20
     assignment_top_k: int = 1
     assignment_top_k_extra_penalty: float = 1e-4
+    assignment_lookahead_steps: int = 0
+    assignment_lookahead_weight: float = 1.0
     assignment_beam_width: int = 4
     assignment_candidates_per_step: int = 0
     assignment_fail_if_unassigned: bool = False
