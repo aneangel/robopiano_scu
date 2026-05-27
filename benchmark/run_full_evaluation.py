@@ -37,7 +37,11 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-REPO_ROOT = Path("/Users/aangeles/robopiano").resolve()
+# Default to the repo containing this file (works on any host).
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# Allow override via env var for unusual layouts.
+import os as _os
+REPO_ROOT = Path(_os.environ.get("ROBOPIANO_REPO_ROOT", str(REPO_ROOT))).resolve()
 PLAN_SCRIPT = REPO_ROOT / "Impromptu" / "scripts" / "plan_trajectory.py"
 ROLLOUT_SCRIPT = REPO_ROOT / "retest_impromptu_rp1m_simulator.py"
 
