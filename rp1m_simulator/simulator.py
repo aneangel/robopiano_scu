@@ -465,6 +465,45 @@ def _capture_hand_qpos(task: Any, physics: Any) -> np.ndarray | None:
     return np.asarray(values, dtype=np.float32)
 
 
+def _capture_hand_qvel(task: Any, physics: Any) -> np.ndarray | None:
+    joints = _hand_joint_handles(task)
+    if not joints:
+        return None
+    values: list[float] = []
+    for joint in joints:
+        q = np.asarray(physics.bind(joint).qvel, dtype=np.float64).reshape(-1)
+        values.append(float(q[0]) if q.size else 0.0)
+    return np.asarray(values, dtype=np.float32)
+
+
+def _element_name(element: Any) -> str:
+    for attr in ("full_identifier", "identifier", "name"):
+        value = getattr(element, attr, None)
+        if callable(value):
+            try:
+                value = value()
+            except TypeError:
+                pass
+        if value:
+            return str(value)
+    return str(element)
+
+
+def _hand_joint_names(task: Any) -> list[str]:
+    return [_element_name(joint) for joint in _hand_joint_handles(task)]
+
+
+def _hand_actuator_names(task: Any) -> list[str]:
+    names: list[str] = []
+    for hand_name in ("right_hand", "left_hand"):
+        hand = getattr(task, hand_name, None)
+        actuators = getattr(hand, "actuators", None)
+        if actuators is not None:
+            names.extend(_element_name(actuator) for actuator in actuators)
+    names.append("sustain")
+    return names
+
+
 def _capture_fingertips(task: Any, physics: Any) -> np.ndarray | None:
     sites = []
     for hand_name in ("right_hand", "left_hand"):
@@ -634,6 +673,83 @@ def _apply_control_overrides(control: np.ndarray, overrides: dict[int, float]) -
         if 0 <= idx < control.size:
             control[idx] = value
     return control
+
+
+def _controller_metadata(action_controller: Any | None) -> dict[str, Any] | None:
+    if action_controller is None:
+        return None
+    metadata = getattr(action_controller, "metadata", None)
+    if callable(metadata):
+        try:
+            return _jsonable(metadata())
+        except Exception as exc:
+            return {"metadata_error": f"{type(exc).__name__}: {exc}"}
+    return {"controller_type": type(action_controller).__name__}
+
+
+def _reset_action_controller(
+    action_controller: Any,
+    *,
+    action_spec: Any,
+    initial_hand_qpos: np.ndarray | None,
+    initial_hand_qvel: np.ndarray | None,
+    trajectory_hand_qpos: np.ndarray | None,
+    hand_joint_names: list[str],
+    actuator_names: list[str],
+    config: RolloutConfig,
+) -> None:
+    reset = getattr(action_controller, "reset", None)
+    if not callable(reset):
+        return
+    reset(
+        action_spec=action_spec,
+        initial_hand_qpos=initial_hand_qpos,
+        initial_hand_qvel=initial_hand_qvel,
+        trajectory_hand_qpos=trajectory_hand_qpos,
+        hand_joint_names=hand_joint_names,
+        actuator_names=actuator_names,
+        config=config,
+    )
+
+
+def _compute_controller_control(
+    action_controller: Any,
+    *,
+    action_spec: Any,
+    source_t: int,
+    substep: int,
+    substeps: int,
+    control_timestep: float,
+    dataset_timestep: float,
+    current_hand_qpos: np.ndarray,
+    current_hand_qvel: np.ndarray | None,
+    source_hand_qpos: np.ndarray,
+    target_hand_qpos: np.ndarray,
+    previous_control: np.ndarray | None,
+) -> np.ndarray:
+    compute = getattr(action_controller, "compute_control", None)
+    if not callable(compute):
+        raise TypeError("action_controller must provide compute_control(...)")
+    control = compute(
+        action_spec=action_spec,
+        source_t=int(source_t),
+        substep=int(substep),
+        substeps=int(substeps),
+        time_s=float((int(source_t) * int(substeps) + int(substep)) * float(control_timestep)),
+        simulation_timestep=float(control_timestep),
+        dataset_timestep=float(dataset_timestep),
+        current_hand_qpos=current_hand_qpos,
+        current_hand_qvel=current_hand_qvel,
+        source_hand_qpos=source_hand_qpos,
+        target_hand_qpos=target_hand_qpos,
+        previous_control=previous_control,
+    )
+    values = np.asarray(control, dtype=np.float32).reshape(-1)
+    if values.shape != tuple(action_spec.shape):
+        raise ValueError(f"Controller returned control shape {values.shape}, expected {action_spec.shape}")
+    minimum = np.asarray(action_spec.minimum, dtype=np.float32).reshape(-1)
+    maximum = np.asarray(action_spec.maximum, dtype=np.float32).reshape(-1)
+    return np.clip(values, minimum, maximum).astype(np.float32)
 
 
 def _apply_mujoco_options(physics: Any, config: RolloutConfig) -> dict[str, int]:
@@ -858,6 +974,8 @@ def simulate_rp1m_rollout(
     trajectory: RP1MTrajectory,
     config: RolloutConfig,
     output_dir: str | Path,
+    *,
+    action_controller: Any | None = None,
 ) -> dict[str, Any]:
     """Roll out RP1M through RoboPianist without ever restoring piano key states."""
     os.environ.setdefault("MUJOCO_GL", "egl")
@@ -875,6 +993,8 @@ def simulate_rp1m_rollout(
 
     if config.mode not in {"hand_state", "action"}:
         raise ValueError(f"Unknown rollout mode: {config.mode}")
+    if action_controller is not None and config.mode != "action":
+        raise ValueError("action_controller is only valid with RolloutConfig(mode='action')")
     runtime_config, runtime_policy = _action_runtime_config(config, int(actions.shape[-1]))
     if runtime_config.max_source_steps is not None:
         source_steps = min(source_steps, int(runtime_config.max_source_steps))
@@ -892,6 +1012,7 @@ def simulate_rp1m_rollout(
         if runtime_config.action_substep_policy not in ACTION_SUBSTEP_POLICIES:
             raise ValueError(f"Unknown action_substep_policy: {runtime_config.action_substep_policy}")
         runtime_policy["action_substep_policy"] = runtime_config.action_substep_policy
+        runtime_policy["action_controller"] = _controller_metadata(action_controller)
         runtime_policy["action_source_substeps_per_source_step"] = (
             int(substeps) if runtime_config.action_substep_policy == "repeat" else 1
         )
@@ -923,6 +1044,8 @@ def simulate_rp1m_rollout(
     source_played: list[np.ndarray] = []
     dense_played: list[np.ndarray] = []
     source_hand: list[np.ndarray] = []
+    dense_hand: list[np.ndarray] = []
+    dense_action_controls: list[np.ndarray] = []
     total_reward = 0.0
     actions_executed = 0
     render_error = None
@@ -982,6 +1105,20 @@ def simulate_rp1m_rollout(
                 wrist_qpos = np.zeros((0,), dtype=np.float32)
                 initial_hand_policy["wrist_override_source"] = "unavailable"
             control_overrides = _initial_wrist_control_overrides(wrist_qpos, action_spec, effective_config)
+            if action_controller is not None:
+                _reset_action_controller(
+                    action_controller,
+                    action_spec=action_spec,
+                    initial_hand_qpos=_capture_hand_qpos(task, physics),
+                    initial_hand_qvel=_capture_hand_qvel(task, physics),
+                    trajectory_hand_qpos=hand_joints,
+                    hand_joint_names=_hand_joint_names(task),
+                    actuator_names=_hand_actuator_names(task),
+                    config=effective_config,
+                )
+                load_info["action_controller_reset"] = True
+                load_info["action_controller_hand_joint_names"] = _hand_joint_names(task)
+                load_info["action_controller_actuator_names"] = _hand_actuator_names(task)
         render_stride = max(int(effective_config.render_every_source_step), 1)
         zero_action = np.zeros_like(actions[0])
         held_action_control: np.ndarray | None = None
@@ -1023,7 +1160,27 @@ def simulate_rp1m_rollout(
                     action = actions[source_t] if effective_config.hand_state_action_source == "recorded" else zero_action
                 else:
                     action = actions[source_t]
-                if effective_config.mode == "action" and substep > 0:
+                if effective_config.mode == "action" and action_controller is not None:
+                    task, physics, _piano = _locate_task_physics_piano(env)
+                    current_hand = _capture_hand_qpos(task, physics)
+                    if current_hand is None:
+                        raise RuntimeError("Controller rollout could not capture current hand qpos")
+                    control = _compute_controller_control(
+                        action_controller,
+                        action_spec=action_spec,
+                        source_t=source_t,
+                        substep=substep,
+                        substeps=substeps,
+                        control_timestep=control_timestep,
+                        dataset_timestep=effective_config.dataset_timestep,
+                        current_hand_qpos=current_hand,
+                        current_hand_qvel=_capture_hand_qvel(task, physics),
+                        source_hand_qpos=hand_joints[source_t],
+                        target_hand_qpos=hand_joints[next_t],
+                        previous_control=held_action_control,
+                    )
+                    held_action_control = control.copy()
+                elif effective_config.mode == "action" and substep > 0:
                     if effective_config.action_substep_policy == "repeat":
                         control = _prepare_control(action, action_spec, effective_config)
                     elif effective_config.action_substep_policy == "zero_control":
@@ -1042,6 +1199,7 @@ def simulate_rp1m_rollout(
                         held_action_control = control.copy()
                 if effective_config.mode == "action":
                     control = _apply_control_overrides(control, control_overrides)
+                dense_action_controls.append(np.asarray(control, dtype=np.float32).reshape(-1))
                 timestep = env.step(control)
                 total_reward += float(timestep.reward or 0.0)
                 actions_executed += 1
@@ -1050,6 +1208,11 @@ def simulate_rp1m_rollout(
                     activation = np.asarray(activation, dtype=np.float32)[:88]
                     interval.append(activation)
                     dense_played.append(activation)
+                if action_controller is not None:
+                    task, physics, _piano = _locate_task_physics_piano(env)
+                    dense_hand_qpos = _capture_hand_qpos(task, physics)
+                    if dense_hand_qpos is not None:
+                        dense_hand.append(dense_hand_qpos.astype(np.float32))
                 if timestep.last():
                     terminated = True
                     break
@@ -1093,12 +1256,20 @@ def simulate_rp1m_rollout(
     source_played_arr = np.stack(source_played, axis=0) if source_played else np.zeros((0, 88), dtype=np.float32)
     dense_played_arr = np.stack(dense_played, axis=0) if dense_played else np.zeros((0, 88), dtype=np.float32)
     source_hand_arr = np.stack(source_hand, axis=0) if source_hand else np.zeros((0, hand_joints.shape[-1]), dtype=np.float32)
+    dense_hand_arr = np.stack(dense_hand, axis=0) if dense_hand else np.zeros((0, hand_joints.shape[-1]), dtype=np.float32)
+    dense_action_control_arr = (
+        np.stack(dense_action_controls, axis=0)
+        if dense_action_controls
+        else np.zeros((0, int(actions.shape[-1])), dtype=np.float32)
+    )
     npz_path = output / "rollout.npz"
     np.savez_compressed(
         npz_path,
         source_played_piano=source_played_arr,
         dense_played_piano=dense_played_arr,
         source_hand_after_step=source_hand_arr,
+        dense_hand_after_step=dense_hand_arr,
+        dense_action_controls=dense_action_control_arr,
         goals=goals[: source_played_arr.shape[0], :88],
         actions=actions[:source_steps],
         reference_piano_states_for_scoring=(
@@ -1148,6 +1319,7 @@ def simulate_rp1m_rollout(
         "config": asdict(config),
         "effective_config": asdict(effective_config),
         "runtime_policy": runtime_policy,
+        "action_controller": _controller_metadata(action_controller),
         "initial_hand_policy": initial_hand_policy,
         "hand_anchor_calibration": hand_anchor_calibration,
         "post_reset_hand_anchor": post_reset_hand_anchor,

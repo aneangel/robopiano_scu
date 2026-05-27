@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pid-controller"
+version = "0.1.0"
+description = "P/PD/PID action controller for tracking Impromptu hand-state rollouts in RoboPianist"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jack Landers"}, {name = "OpenAI Codex"}]
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["src", "..", "../Intermezzo/src", "../Impromptu/src", "../partita/src"]
+
+[tool.ruff]
+line-length = 100
