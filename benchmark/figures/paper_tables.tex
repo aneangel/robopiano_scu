@@ -1,0 +1,181 @@
+% =============================================================================
+% Paper tables for the Sonata / robopiano CoRL submission.
+% Numbers are from actual evaluation runs committed in
+% benchmark/results/eval_runs/. Re-generate with
+% benchmark/figures/make_paper_figures.py if the CSVs change.
+%
+% Requires: \usepackage{booktabs}
+% =============================================================================
+
+
+% -----------------------------------------------------------------------------
+% TABLE 1 — Main result on MAESTRO v3 test split (177 songs).
+% Apples-to-apples: same 177 songs, same 30 s active window, same
+% retest_impromptu_rp1m_simulator.py rollout pipeline. The only difference
+% between rows is the LM budget (multistart seeds and max_nfev).
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Sonata on the MAESTRO v3 test split (177 songs, 30\,s active window).
+Both rows evaluate the same songs under the same rollout pipeline; the only
+difference is the IK budget (multistart seeds and \texttt{max\_nfev}). Wall
+time is per song, single-machine, Apple M3 Pro 6-way parallel.}
+\label{tab:main_177}
+\begin{tabular}{lcccccc}
+\toprule
+Config & Mean F1 & Median F1 & p25--p75 & $\geq 0.60$ & $\geq 0.70$ & Wall (s) \\
+\midrule
+Baseline (nfev=60, no multistart)            & 0.580 & 0.588 & 0.50--0.66 & 45\% & 12\% & 66 \\
+\textbf{Lifted} (nfev=240, 6-seed multistart) & \textbf{0.605} & \textbf{0.610} & 0.53--0.68 & \textbf{55\%} & \textbf{19\%} & 205 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% -----------------------------------------------------------------------------
+% TABLE 2 — Per-composer breakdown on the same 177-song run as Table 1.
+% Composers with fewer than 5 songs are aggregated into "Other".
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Sonata F1 per composer on the MAESTRO v3 test split (177 songs, lifted
+config from Table~\ref{tab:main_177}). Reported for composers with at least
+five songs in the split. Whiskers (p25--p75) are computed across songs by
+that composer.}
+\label{tab:per_composer}
+\begin{tabular}{lcccc}
+\toprule
+Composer & $n$ & Mean F1 & Median F1 & p25--p75 \\
+\midrule
+Domenico Scarlatti      & 13 & \textbf{0.714} & 0.712 & 0.68--0.74 \\
+Wolfgang Amadeus Mozart &  7 & 0.704 & 0.741 & 0.62--0.76 \\
+Johann Sebastian Bach   & 17 & 0.694 & 0.692 & 0.66--0.75 \\
+Joseph Haydn            &  7 & 0.691 & 0.684 & 0.66--0.70 \\
+\midrule
+Alexander Scriabin      &  6 & 0.618 & 0.619 & 0.56--0.63 \\
+Franz Schubert          & 23 & 0.603 & 0.616 & 0.56--0.66 \\
+Fr\'ed\'eric Chopin     & 25 & 0.590 & 0.596 & 0.50--0.65 \\
+Claude Debussy          &  8 & 0.587 & 0.622 & 0.60--0.66 \\
+\midrule
+Ludwig van Beethoven    & 24 & 0.567 & 0.576 & 0.52--0.64 \\
+Robert Schumann         &  8 & 0.554 & 0.569 & 0.56--0.59 \\
+Sergei Rachmaninoff     & 12 & 0.551 & 0.494 & 0.48--0.66 \\
+Franz Liszt             & 20 & 0.532 & 0.557 & 0.47--0.59 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% -----------------------------------------------------------------------------
+% TABLE 3 — Architectural ablation on the synthetic stress MIDI (dense
+% bimanual MIDI, 15 s active window). Reported metric is static contact F1
+% (sum of per-waypoint contact hits divided by hits + 0.5*(wrongs + missed)).
+% Each row adds the listed component on top of the prior. This is the
+% experiment where we directly measure each lever's contribution.
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Architectural ablation. Each row adds the listed component on top
+of the prior row. Reported metric is static contact F1 on a synthetic
+bimanual stress MIDI (15\,s active window); wall is the per-song planning
+wall on the same machine. Cumulative speedup vs.\ Baseline is shown in the
+final column.}
+\label{tab:ablation}
+\begin{tabular}{lccr}
+\toprule
+Component                                        & Static F1 & Wall (s) & Speedup \\
+\midrule
+Baseline (scipy LM, no cache)                    & 0.369 & 118.6 & 1.0$\times$ \\
+$+$ Keyset fingerprint cache                     & 0.420 &  77.2 & 1.5$\times$ \\
+$+$ Cache warm-start seed                        & 0.420 &  72.0 & 1.6$\times$ \\
+$+$ Vectorized \texttt{\_set\_qpos} (Lever 1)    & 0.420 &  62.4 & 1.9$\times$ \\
+$+$ Analytical Jacobian via \texttt{mj\_jacSite} (Lever 2) & 0.412 &  13.5 & 8.8$\times$ \\
+$+$ Contact-perfect early-exit (Lever 3)         & 0.444 &  13.5 & 8.8$\times$ \\
+$+$ Tuned weights $+$ avoid\_mispresses $+$ top-$k$=2 & \textbf{0.778} &  21.6 & 5.5$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% -----------------------------------------------------------------------------
+% TABLE 4 — Speed / quality summary across measured configurations.
+% Each row is a distinct subset and config we measured. Provides the
+% complete trade-off scoreboard.
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Speed/quality scoreboard across the configurations measured in this
+work. Mean F1 is rollout frame F1 except for the synthetic dense\_test row,
+which reports static contact F1. All rows use the decomposed Sonata
+pipeline; the difference is the LM budget and the eval window. Wall is the
+per-song wall on Apple M3 Pro (6-way for $n>1$).}
+\label{tab:scoreboard}
+\begin{tabular}{lcccc}
+\toprule
+Subset                              & $n$  & Window & Mean F1 & Wall (s) \\
+\midrule
+Synthetic dense\_test (stress)      & 1    & 15\,s & 0.778  & 22  \\
+10-song mix (curated easy+hard)     & 10   & 30\,s & 0.555  & 66  \\
+$\;\;\;$ + 6-seed multistart, nfev=240 & 10 & 30\,s & \textbf{0.631} & 166 \\
+25 shortest test-split songs         & 25  & 30\,s & 0.607  & 73  \\
+177 MAESTRO v3 test split (baseline) & 177 & 30\,s & 0.580  & 66  \\
+177 MAESTRO v3 test split (lifted)   & 177 & 30\,s & \textbf{0.605} & 205 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% -----------------------------------------------------------------------------
+% TABLE 5 — External baseline reference (NOT apples-to-apples).
+% Numbers from published papers using different evaluation conditions.
+% Included as a frame-of-reference for the reader, not as a head-to-head.
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Published rollout F1 for prior work, reproduced from the original
+papers. \textbf{These rows are not directly comparable to ours:} PianoMime
+evaluates on novel unseen pieces sampled from internet videos;
+PANDORA evaluates on the RoboPianist Etude-12 curated subset (not MAESTRO);
+OmniPianist evaluates on 100 unseen MAESTRO pieces; ours is the full
+MAESTRO v3 test split (177 songs). Sonata reports the lifted configuration
+from Table~\ref{tab:main_177}.}
+\label{tab:external_baselines}
+\begin{tabular}{lll}
+\toprule
+Method                          & Eval set                     & Reported F1 \\
+\midrule
+PianoMime~\cite{pianomime}      & novel pieces (internet)      & 0.56 \\
+OmniPianist~\cite{omnipianist}  & 100 novel MAESTRO pieces     & 0.55 \\
+PANDORA~\cite{pandora}          & RoboPianist Etude-12         & 0.65 \\
+\midrule
+\textbf{Sonata (ours)}          & MAESTRO v3 test (177 songs)  & \textbf{0.605} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% -----------------------------------------------------------------------------
+% Optional: compact one-row summary table for the abstract / intro.
+% Drop into a teaser figure or section header.
+% -----------------------------------------------------------------------------
+\begin{table}[t]
+\centering
+\caption{Headline result. Sonata on the MAESTRO v3 test split clears the
+0.60 F1 floor at a fully classical decomposed pipeline, with zero crashes
+across the full 177 songs and a per-song wall under 4 minutes on commodity
+CPU. Architectural levers (cache, analytical Jacobian, contact-perfect
+multistart) and configuration tuning together yield $+0.025$ F1 over the
+non-multistart baseline.}
+\label{tab:headline}
+\begin{tabular}{lcc}
+\toprule
+Metric on MAESTRO v3 test (177)     & Baseline & Sonata (ours) \\
+\midrule
+Mean rollout frame F1                & 0.580 & \textbf{0.605} \\
+Songs with F1 $\geq 0.60$            & 79  & \textbf{98}  \\
+Songs with F1 $\geq 0.70$            & 21  & \textbf{33}  \\
+Crashes                              & 0   & 0   \\
+Wall per song (mean)                 & 66\,s & 205\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
